@@ -1,0 +1,4 @@
+{
+  "parent": "minecraft:item/generated",
+  "textures": { "layer0": "camera-mod:item/half_frame_cmos" }
+}

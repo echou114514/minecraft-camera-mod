@@ -1,0 +1,15 @@
+{
+	"required": true,
+	"package": "com.example.camera.client.mixin",
+	"compatibilityLevel": "JAVA_21",
+	"client": [
+		"ExampleClientMixin",
+		"GameRendererMixin",
+		"GameRendererWorldMixin",
+		"InGameHudMixin",
+		"MinecraftClientMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}

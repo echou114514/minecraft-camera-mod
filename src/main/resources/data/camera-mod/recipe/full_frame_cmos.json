@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "pattern": ["P", "P", "R"],
+  "key": {
+    "P": { "item": "minecraft:painting" },
+    "R": { "item": "minecraft:redstone_block" }
+  },
+  "result": { "id": "camera-mod:full_frame_cmos", "count": 1 }
+}

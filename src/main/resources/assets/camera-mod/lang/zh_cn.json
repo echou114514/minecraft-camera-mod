@@ -1,0 +1,11 @@
+{
+  "item.camera-mod.camera_body": "单反机身",
+  "item.camera-mod.lens": "镜头",
+  "item.camera-mod.half_frame_cmos": "半画幅 CMOS",
+  "item.camera-mod.full_frame_cmos": "全画幅 CMOS",
+  "key.camera-mod.shutter": "快门",
+  "category.camera-mod": "相机模组",
+  "key.camera-mod.zoom_in": "变焦 +",
+  "key.camera-mod.zoom_out": "变焦 -",
+  "key.camera-mod.metering": "测光模式"
+}

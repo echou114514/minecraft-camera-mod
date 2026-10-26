@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "pattern": ["G", "I"],
+  "key": {
+    "G": { "item": "minecraft:glass" },
+    "I": { "item": "minecraft:iron_block" }
+  },
+  "result": { "id": "camera-mod:lens", "count": 1 }
+}
