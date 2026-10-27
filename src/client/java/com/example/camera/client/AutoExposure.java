@@ -31,17 +31,6 @@ public class AutoExposure {
         public float aperture;
     }
 
-    /**
-     * A+ / P 全自动
-     * 暗光提升曝光的阶段：
-     *   1. 快门 → 2× 安全快门
-     *   2. ISO 100 → 3200
-     *   3. 快门 → 1× 安全快门
-     *   4. ISO 3200 → 12800
-     *   5. 快门 → 模式上限
-     *   6. ISO 12800 → 25600
-     * 亮光方向反过来
-     */
     public static AutoResult computeFullAuto(double sceneEV, int focalLength,
                                              float maxAperture, int slowestShutter, int manualIso) {
         AutoResult r = new AutoResult();
@@ -125,7 +114,6 @@ public class AutoExposure {
         return r;
     }
 
-    /** Av：光圈手动锁定，快门 + ISO 自动 */
     public static AutoResult computeAv(double sceneEV, float manualAp, int focalLength,
                                        int slowestShutter, int manualIso) {
         AutoResult r = new AutoResult();
@@ -189,7 +177,6 @@ public class AutoExposure {
         return r;
     }
 
-    /** Tv：快门手动锁定，光圈 + ISO 自动 */
     public static AutoResult computeTv(double sceneEV, int manualShutter,
                                        float maxAperture, int manualIso) {
         AutoResult r = new AutoResult();
@@ -206,7 +193,6 @@ public class AutoExposure {
 
         if (snapped < maxAperture) {
             r.aperture = maxAperture;
-            // 光圈已最大还是太暗 → 升 ISO
             if (isoAuto) {
                 double evAtBase = log2(maxAperture * maxAperture / t);
                 double isoLog = evAtBase - sceneEV;
@@ -222,7 +208,6 @@ public class AutoExposure {
         return r;
     }
 
-    /** M / B：光圈快门手动，只算自动 ISO */
     public static int computeManualIso(double sceneEV, float aperture, int shutter) {
         double t = Metering.shutterToSeconds(shutter);
         double evAtIso100 = log2(aperture * aperture / t);

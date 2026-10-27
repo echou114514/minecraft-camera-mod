@@ -436,7 +436,6 @@ public class CameraModClient implements ClientModInitializer {
 		LensSpec spec = Jingtou.getSpec(lensStack);
 		if (!spec.isZoom) return;
 
-		// 变焦步长随广角端和长焦端自动调整
 		int step = Math.max(1, (int) ((spec.maxFocalLength - spec.baseFocalLength) * 0.1f));
 		int newFocal = spec.focalLength + dir * step;
 		if (newFocal < spec.baseFocalLength) newFocal = spec.baseFocalLength;
