@@ -185,6 +185,9 @@ public class CameraModClient implements ClientModInitializer {
 		});
 
 		HudRenderCallback.EVENT.register((DrawContext ctx, RenderTickCounter tickCounter) -> {
+			// The capture reads the frame after the world but before this callback
+			// finishes, so never let camera overlays or noise leak into the photo.
+			if (HighResCapture.isWaiting() || HighResCapture.isCapturing()) return;
 			if (!cameraMode) return;
 			MinecraftClient client = MinecraftClient.getInstance();
 			int w = ctx.getScaledWindowWidth();
@@ -265,6 +268,7 @@ public class CameraModClient implements ClientModInitializer {
 		}
 
 		HighResCapture.snapshotExposureEV = nbt.getInt("evCompStep") / 3.0f;
+		HighResCapture.snapshotMeterEV = (float) lastDiff;
 		HighResCapture.snapshotWb = cachedWb;
 		HighResCapture.snapshotSceneTemp = cachedSceneTemp;
 		HighResCapture.snapshotTone = cachedTone;

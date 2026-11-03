@@ -4,25 +4,37 @@ import com.example.camera.client.dof.DepthOfField;
 import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gl.Framebuffer;
+import net.minecraft.text.ClickEvent;
+import net.minecraft.text.MutableText;
+import net.minecraft.text.Text;
+import net.minecraft.util.Formatting;
 import org.lwjgl.BufferUtils;
 import org.lwjgl.opengl.GL11;
-import org.lwjgl.opengl.GL30;
 
 import java.io.File;
+import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
+import java.util.stream.IntStream;
 
 public class HighResCapture {
     public static final int FULL_W = 7680;
     public static final int FULL_H = 4320;
 
+    private static final float MIDDLE_GRAY = 0.15f;
+    private static final int SRGB_LUT_SIZE = 4096;
+    private static final float[] SRGB_LUT = buildSrgbLut();
+    private static final float[] SRGB_BYTE_LUT = buildSrgbByteLut();
+
     private static FloatBuffer cachedColorBuf = null;
     private static FloatBuffer cachedDepthBuf = null;
     private static FloatBuffer cachedDofBuf = null;
     private static ByteBuffer cachedPixelBuffer = null;
+    private static ByteBuffer cachedLdrBuffer = null;
 
     public static float snapshotExposureEV = 0f;
+    public static float snapshotMeterEV = 0f;
     public static int snapshotWb = 5500;
     public static int snapshotSceneTemp = 5500;
     public static int snapshotTone = 0;
@@ -53,10 +65,30 @@ public class HighResCapture {
     private static boolean resolutionChanged;
     private static boolean restorePending;
     private static boolean captureCompleted;
+    private static boolean restoreHudHidden;
+
+    private static boolean hdrCaptured;
+    private static boolean depthCaptured;
+    private static boolean linearScene = true;
+    private static int captureAttempts;
+    private static boolean restoreRenderHand = true;
+    private static Field renderHandField;
+
+    /**
+     * Number of frames to let the world render at full resolution before the
+     * pixels are read. Temporal antialiasing keeps blending the new 8K frame
+     * with the upscaled history buffer, so a capture taken on the first frame
+     * after the resize looks soft. A handful of frames is enough for the
+     * history to wash out without making the shutter feel slow.
+     */
+    private static int settleFrames() {
+        return Math.max(1, Integer.getInteger("cameramod.settleFrames", 4));
+    }
 
     public static boolean isCapturing() { return state == State.CAPTURING; }
     public static boolean isActive() { return state == State.CAPTURING; }
     public static boolean isWaiting() { return state == State.WAITING; }
+    public static boolean isBusy() { return state != State.IDLE || restorePending; }
     public static boolean consumeCompletion() {
         boolean completed = captureCompleted;
         captureCompleted = false;
@@ -76,8 +108,13 @@ public class HighResCapture {
 
         try {
             resolutionChanged = true;
+            hdrCaptured = false;
+            depthCaptured = false;
             window.setFramebufferWidth(FULL_W);
             window.setFramebufferHeight(FULL_H);
+            restoreHudHidden = client.options.hudHidden;
+            client.options.hudHidden = true;
+            hideHeldItem(client);
             client.onResolutionChanged();
 
             Framebuffer framebuffer = client.getFramebuffer();
@@ -86,7 +123,7 @@ public class HighResCapture {
                 return false;
             }
             state = State.WAITING;
-            waitFrames = 1;
+            waitFrames = settleFrames();
             return true;
         } catch (Throwable t) {
             state = State.IDLE;
@@ -100,9 +137,36 @@ public class HighResCapture {
         if (restorePending || (resolutionChanged && state == State.IDLE)) restoreResolution(client);
     }
 
+    /**
+     * Called from the optional Iris mixin right before the pack's final pass.
+     * At this point Iris has finished all composite passes, so the configured
+     * target holds the scene in linear light before exposure and tonemapping.
+     */
+    public static void onIrisFinalPass(Object finalPassRenderer) {
+        if (state != State.CAPTURING || hdrCaptured) return;
+        ensureBuffers();
+        IrisHdrSource.Source source = IrisHdrSource.find(finalPassRenderer, FULL_W, FULL_H);
+        if (source == null) return;
+
+        cachedColorBuf.clear();
+        if (!IrisHdrSource.readColor(source, cachedColorBuf)) return;
+        hdrCaptured = true;
+        linearScene = true;
+
+        cachedDepthBuf.clear();
+        depthCaptured = IrisHdrSource.readDepth(source, cachedDepthBuf);
+        System.out.println("[CameraMod] Iris HDR: colortex" + source.target
+                + (depthCaptured ? " + depth" : " 深度不可用(" + IrisHdrSource.lastStatus() + ")")
+                + " " + source.width + "x" + source.height);
+    }
+
     public static void afterFrame(MinecraftClient client) {
         if (state == State.WAITING) {
-            if (--waitFrames <= 0) state = State.CAPTURING;
+            if (--waitFrames <= 0) {
+                ensureBuffers();
+                captureAttempts = 0;
+                state = State.CAPTURING;
+            }
             return;
         }
         if (state != State.CAPTURING) return;
@@ -114,68 +178,49 @@ public class HighResCapture {
             return;
         }
 
-        try {
-            if (cachedColorBuf == null) {
-                cachedColorBuf = BufferUtils.createFloatBuffer(FULL_W * FULL_H * 4);
-                cachedDepthBuf = BufferUtils.createFloatBuffer(FULL_W * FULL_H);
-                cachedDofBuf = BufferUtils.createFloatBuffer(FULL_W * FULL_H * 4);
-                cachedPixelBuffer = BufferUtils.createByteBuffer(FULL_W * FULL_H * 3 * 4).order(ByteOrder.LITTLE_ENDIAN);
-            } else {
-                cachedColorBuf.clear();
-                cachedDepthBuf.clear();
-                cachedDofBuf.clear();
-                cachedPixelBuffer.clear();
-            }
+        // Iris resizes its own targets on the frame after the window changed.
+        // Give the HDR source a couple of extra frames before falling back to
+        // the LDR main target.
+        if (!hdrCaptured && IrisHdrSource.configuredTarget() >= 0
+                && IrisHdrSource.isAvailable() && captureAttempts < 2) {
+            captureAttempts++;
+            return;
+        }
 
-            // Framebuffer.beginRead() binds the color texture, not an FBO. glReadPixels
-            // reads from GL_READ_FRAMEBUFFER, which is otherwise the default (often black).
-            int previousReadFramebuffer = GL11.glGetInteger(GL30.GL_READ_FRAMEBUFFER_BINDING);
-            int previousPackAlignment = GL11.glGetInteger(GL11.GL_PACK_ALIGNMENT);
-            try {
-                GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, fb.fbo);
-                GL11.glPixelStorei(GL11.GL_PACK_ALIGNMENT, 1);
-                GL11.glReadPixels(0, 0, FULL_W, FULL_H, GL11.GL_RGBA, GL11.GL_FLOAT, cachedColorBuf);
-                GL11.glReadPixels(0, 0, FULL_W, FULL_H, GL11.GL_DEPTH_COMPONENT, GL11.GL_FLOAT, cachedDepthBuf);
-            } finally {
-                GL11.glPixelStorei(GL11.GL_PACK_ALIGNMENT, previousPackAlignment);
-                GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, previousReadFramebuffer);
+        try {
+            ensureBuffers();
+            cachedColorBuf.clear();
+            cachedDepthBuf.clear();
+            cachedDofBuf.clear();
+            cachedPixelBuffer.clear();
+
+            if (!hdrCaptured) {
+                if (IrisHdrSource.configuredTarget() >= 0 && IrisHdrSource.isAvailable()) {
+                    System.out.println("[CameraMod] Iris HDR 未就绪，回退到主目标");
+                }
+                readMainTarget(client, fb);
+            }
+            if (!depthCaptured) {
+                cachedDepthBuf.clear();
+                depthCaptured = GlReadback.readDepthFloat(fb.fbo, FULL_W, FULL_H, cachedDepthBuf)
+                        && GlReadback.hasDepthVariation(cachedDepthBuf);
+                System.out.println("[CameraMod] 主目标深度: " + (depthCaptured ? "可读" : "无效或读取失败"));
+            }
+            if (depthCaptured) {
+                System.out.println("[CameraMod] " + describeDepth(cachedDepthBuf));
             }
 
             long dofStart = System.currentTimeMillis();
-            applyDepthOfField(cachedColorBuf, cachedDepthBuf, cachedDofBuf, FULL_W, FULL_H,
-                    snapshotFocusDistance, snapshotFocalLength, snapshotAperture, cameraNear, cameraFar);
+            if (depthCaptured) {
+                applyDepthOfField(cachedColorBuf, cachedDepthBuf, cachedDofBuf, FULL_W, FULL_H,
+                        snapshotFocusDistance, snapshotFocalLength, snapshotAperture, cameraNear, cameraFar);
+            } else {
+                copyColor(cachedColorBuf, cachedDofBuf);
+            }
             System.out.println("[CameraMod] 景深耗时: " + (System.currentTimeMillis() - dofStart) + "ms");
 
-            float exposureFactor = (float) Math.pow(2, snapshotExposureEV);
-            float wbAlpha = 0f, wbColorR = 0f, wbColorG = 0f, wbColorB = 0f;
-            int wbDiff = snapshotWb - snapshotSceneTemp;
-            if (Math.abs(wbDiff) >= 600) {
-                if (wbDiff > 0) { double t = Math.min(1.0, (wbDiff - 600) / 4400.0); wbAlpha = (float)(t*0.18); wbColorR=1f; wbColorG=136f/255f; wbColorB=0f; }
-                else { double t = Math.min(1.0, (-wbDiff - 600) / 2900.0); wbAlpha = (float)(t*0.18); wbColorR=0f; wbColorG=136f/255f; wbColorB=1f; }
-            }
-
-            float toneAlpha = 0f, toneColorR = 0f, toneColorG = 0f, toneColorB = 0f;
-            if (snapshotTone > 0) { toneAlpha = (float)(snapshotTone/4.0*0.12); toneColorR=1f; toneColorG=0f; toneColorB=1f; }
-            else if (snapshotTone < 0) { toneAlpha = (float)(-snapshotTone/4.0*0.12); toneColorR=0f; toneColorG=1f; toneColorB=0f; }
-
-            for (int y = 0; y < FULL_H; y++) {
-                for (int x = 0; x < FULL_W; x++) {
-                    int srcY = FULL_H - 1 - y;
-                    int src = (srcY * FULL_W + x) * 4;
-
-                    float rf = cachedDofBuf.get(src) * exposureFactor;
-                    float gf = cachedDofBuf.get(src + 1) * exposureFactor;
-                    float bf = cachedDofBuf.get(src + 2) * exposureFactor;
-
-                    if (wbAlpha > 0) { rf = rf*(1-wbAlpha) + wbColorR*wbAlpha; gf = gf*(1-wbAlpha) + wbColorG*wbAlpha; bf = bf*(1-wbAlpha) + wbColorB*wbAlpha; }
-                    if (toneAlpha > 0) { rf = rf*(1-toneAlpha) + toneColorR*toneAlpha; gf = gf*(1-toneAlpha) + toneColorG*toneAlpha; bf = bf*(1-toneAlpha) + toneColorB*toneAlpha; }
-
-                    cachedPixelBuffer.putFloat(rf);
-                    cachedPixelBuffer.putFloat(gf);
-                    cachedPixelBuffer.putFloat(bf);
-                }
-            }
-            cachedPixelBuffer.flip();
+            processToDisplay(cachedDofBuf, cachedPixelBuffer, linearScene);
+            cachedPixelBuffer.position(0);
 
             File dir = new File(client.runDirectory, "screenshots");
             dir.mkdirs();
@@ -188,7 +233,7 @@ public class HighResCapture {
                     snapshotWbAuto, snapshotLensName, snapshotCamName, snapshotDateStr);
 
             if (client.player != null) {
-                client.player.sendMessage(net.minecraft.text.Text.literal("[相机] 20MP TIFF: " + name), false);
+                client.player.sendMessage(cameraMod$fileMessage(file, name), false);
             }
             System.gc();
 
@@ -200,6 +245,235 @@ public class HighResCapture {
             waitFrames = 0;
             restorePending = true;
             captureCompleted = true;
+            hdrCaptured = false;
+            depthCaptured = false;
+        }
+    }
+
+    /**
+     * Builds the chat line that reports the finished capture. The file name is
+     * clickable and opens the TIFF with the system's default viewer, matching
+     * how vanilla reports screenshots.
+     */
+    private static Text cameraMod$fileMessage(File file, String name) {
+        MutableText link = Text.literal(name).styled(style -> style
+                .withColor(Formatting.AQUA)
+                .withUnderline(true)
+                .withClickEvent(new ClickEvent(ClickEvent.Action.OPEN_FILE, file.getAbsolutePath())));
+        return Text.literal("[相机] 20MP TIFF: ").append(link);
+    }
+
+    private static String describeDepth(FloatBuffer depth) {
+        float min = Float.MAX_VALUE;
+        float max = -Float.MAX_VALUE;
+        int nonFar = 0;
+        int samples = 0;
+        for (int i = 0; i < depth.capacity(); i += 4096) {
+            float v = depth.get(i);
+            if (!Float.isFinite(v)) continue;
+            min = Math.min(min, v);
+            max = Math.max(max, v);
+            if (v < 0.999999f) nonFar++;
+            samples++;
+        }
+        if (samples == 0) return "深度缓冲为空";
+        return String.format("深度范围 %.4f..%.4f, 非远平面采样 %d/%d", min, max, nonFar, samples);
+    }
+
+    private static void readMainTarget(MinecraftClient client, Framebuffer fb) {
+        linearScene = false;
+        if (cachedLdrBuffer == null) {
+            cachedLdrBuffer = BufferUtils.createByteBuffer(FULL_W * FULL_H * 4);
+        }
+        cachedLdrBuffer.clear();
+        if (!GlReadback.readRgbaBytes(fb.fbo, FULL_W, FULL_H, cachedLdrBuffer)) return;
+
+        IntStream.range(0, FULL_H).parallel().forEach(y -> {
+            for (int x = 0; x < FULL_W; x++) {
+                int i = (y * FULL_W + x) * 4;
+                float r = SRGB_BYTE_LUT[cachedLdrBuffer.get(i) & 0xFF];
+                float g = SRGB_BYTE_LUT[cachedLdrBuffer.get(i + 1) & 0xFF];
+                float b = SRGB_BYTE_LUT[cachedLdrBuffer.get(i + 2) & 0xFF];
+                cachedColorBuf.put(i, r);
+                cachedColorBuf.put(i + 1, g);
+                cachedColorBuf.put(i + 2, b);
+                cachedColorBuf.put(i + 3, 1f);
+            }
+        });
+    }
+
+    private static void copyColor(FloatBuffer src, FloatBuffer dst) {
+        int n = FULL_W * FULL_H * 4;
+        IntStream.range(0, FULL_H).parallel().forEach(y -> {
+            int start = y * FULL_W * 4;
+            int end = start + FULL_W * 4;
+            for (int i = start; i < end; i++) {
+                dst.put(i, src.get(i));
+            }
+        });
+    }
+
+    /**
+     * Applies exposure, white balance and tonemapping. HDR input is scene
+     * linear, so the key maps the log-average luminance to middle grey and the
+     * ISO/shutter/aperture offset is measured against the metered scene. LDR
+     * input is already tonemapped, so it only gets the exposure offset.
+     */
+    private static void processToDisplay(FloatBuffer src, ByteBuffer dst, boolean linear) {
+        float totalStops = clamp(-snapshotMeterEV + snapshotExposureEV, -16f, 8f);
+        float exposure = (float) Math.pow(2, totalStops);
+        if (linear) {
+            double key = logAverageLuma(src);
+            double base = MIDDLE_GRAY / Math.max(key, 1e-6);
+            exposure *= (float) Math.min(1e6, base);
+            System.out.printf("[CameraMod] 曝光: key=%.4f base=%.4f meterEV=%.2f evComp=%.2f total=%.2f stops%n",
+                    key, base, snapshotMeterEV, snapshotExposureEV, totalStops);
+        } else {
+            exposure = (float) Math.pow(2, clamp(totalStops, -5f, 5f));
+        }
+
+        float wbT = clamp((snapshotWb - snapshotSceneTemp) / 5500f, -1f, 1f);
+        float rGain = 1f + 0.25f * wbT;
+        float gGain = 1f;
+        float bGain = 1f - 0.25f * wbT;
+
+        float toneT = clamp(snapshotTone / 4f, -1f, 1f);
+        rGain *= 1f + 0.08f * toneT;
+        gGain *= 1f - 0.08f * toneT;
+        bGain *= 1f + 0.08f * toneT;
+
+        double noiseSigma = PostProcess.computeLumaNoise(snapshotIso, true);
+        boolean addNoise = noiseSigma > 0.0001;
+
+        final float exp = exposure;
+        final float rg = rGain;
+        final float gg = gGain;
+        final float bg = bGain;
+        final float ns = (float) noiseSigma;
+
+        IntStream.range(0, FULL_H).parallel().forEach(y -> {
+            int srcY = FULL_H - 1 - y;
+            int srcRow = srcY * FULL_W * 4;
+            int dstRow = y * FULL_W * 12;
+            for (int x = 0; x < FULL_W; x++) {
+                int s = srcRow + x * 4;
+                float r = src.get(s) * exp * rg;
+                float g = src.get(s + 1) * exp * gg;
+                float b = src.get(s + 2) * exp * bg;
+                if (!Float.isFinite(r)) r = 0;
+                if (!Float.isFinite(g)) g = 0;
+                if (!Float.isFinite(b)) b = 0;
+
+                if (addNoise) {
+                    float luma = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                    if (luma < 0) luma = 0;
+                    float n = hashNoise(x, y) * 2f * ns * luma;
+                    r += n;
+                    g += n;
+                    b += n;
+                }
+
+                if (linear) {
+                    r = aces(r);
+                    g = aces(g);
+                    b = aces(b);
+                }
+                int d = dstRow + x * 12;
+                dst.putFloat(d, srgbEncode(r));
+                dst.putFloat(d + 4, srgbEncode(g));
+                dst.putFloat(d + 8, srgbEncode(b));
+            }
+        });
+    }
+
+    private static double logAverageLuma(FloatBuffer src) {
+        final int step = 4;
+        double sum = 0;
+        long count = 0;
+        for (int y = 0; y < FULL_H; y += step) {
+            int row = y * FULL_W * 4;
+            for (int x = 0; x < FULL_W; x += step) {
+                int i = row + x * 4;
+                double luma = 0.2126 * src.get(i) + 0.7152 * src.get(i + 1) + 0.0722 * src.get(i + 2);
+                if (!Double.isFinite(luma) || luma < 1e-6) continue;
+                sum += Math.log(luma);
+                count++;
+            }
+        }
+        if (count == 0) return MIDDLE_GRAY;
+        return Math.exp(sum / count);
+    }
+
+    private static float hashNoise(int x, int y) {
+        int h = x * 374761393 + y * 668265263;
+        h = (h ^ (h >>> 13)) * 1274126177;
+        return ((h ^ (h >>> 16)) & 0xFFFF) / 65535f - 0.5f;
+    }
+
+    private static float aces(float x) {
+        if (x <= 0f) return 0f;
+        final float a = 2.51f, b = 0.03f, c = 2.43f, d = 0.59f, e = 0.14f;
+        float v = (x * (a * x + b)) / (x * (c * x + d) + e);
+        return clamp(v, 0f, 1f);
+    }
+
+    private static float srgbEncode(float v) {
+        if (!(v > 0f)) return 0f;
+        if (v >= 1f) return 1f;
+        int index = (int) (v * SRGB_LUT_SIZE + 0.5f);
+        return SRGB_LUT[index];
+    }
+
+    private static float[] buildSrgbLut() {
+        float[] lut = new float[SRGB_LUT_SIZE + 1];
+        for (int i = 0; i <= SRGB_LUT_SIZE; i++) {
+            float v = i / (float) SRGB_LUT_SIZE;
+            lut[i] = v <= 0.0031308f ? 12.92f * v : (float) (1.055 * Math.pow(v, 1.0 / 2.4) - 0.055);
+        }
+        return lut;
+    }
+
+    private static float[] buildSrgbByteLut() {
+        float[] lut = new float[256];
+        for (int i = 0; i < 256; i++) {
+            float v = i / 255f;
+            lut[i] = v <= 0.04045f ? v / 12.92f : (float) Math.pow((v + 0.055f) / 1.055f, 2.4);
+        }
+        return lut;
+    }
+
+    private static float clamp(float v, float min, float max) {
+        return v < min ? min : (v > max ? max : v);
+    }
+
+    private static void ensureBuffers() {
+        if (cachedColorBuf == null) {
+            cachedColorBuf = BufferUtils.createFloatBuffer(FULL_W * FULL_H * 4);
+            cachedDepthBuf = BufferUtils.createFloatBuffer(FULL_W * FULL_H);
+            cachedDofBuf = BufferUtils.createFloatBuffer(FULL_W * FULL_H * 4);
+            cachedPixelBuffer = BufferUtils.createByteBuffer(FULL_W * FULL_H * 3 * 4).order(ByteOrder.LITTLE_ENDIAN);
+            cachedLdrBuffer = BufferUtils.createByteBuffer(FULL_W * FULL_H * 4);
+        }
+    }
+
+    private static void hideHeldItem(MinecraftClient client) {
+        try {
+            if (renderHandField == null) {
+                renderHandField = client.gameRenderer.getClass().getDeclaredField("renderHand");
+                renderHandField.setAccessible(true);
+            }
+            restoreRenderHand = renderHandField.getBoolean(client.gameRenderer);
+        } catch (Throwable ignored) {
+            restoreRenderHand = true;
+        }
+        client.gameRenderer.setRenderHand(false);
+    }
+
+    private static void restoreHeldItem(MinecraftClient client) {
+        try {
+            client.gameRenderer.setRenderHand(restoreRenderHand);
+        } catch (Throwable t) {
+            System.err.println("[CameraMod] 恢复手持物品渲染失败: " + t);
         }
     }
 
@@ -208,6 +482,8 @@ public class HighResCapture {
         try {
             client.getWindow().setFramebufferWidth(restoreWidth);
             client.getWindow().setFramebufferHeight(restoreHeight);
+            client.options.hudHidden = restoreHudHidden;
+            restoreHeldItem(client);
             client.onResolutionChanged();
         } catch (Throwable t) {
             System.err.println("[CameraMod] 恢复窗口渲染尺寸失败: " + t);
@@ -216,6 +492,8 @@ public class HighResCapture {
             restorePending = false;
             state = State.IDLE;
             waitFrames = 0;
+            hdrCaptured = false;
+            depthCaptured = false;
         }
     }
 
@@ -224,7 +502,7 @@ public class HighResCapture {
         float[] coc = new float[n];
         float[] cocTemp = new float[n];
 
-        java.util.stream.IntStream.range(0, n).parallel().forEach(i -> {
+        IntStream.range(0, n).parallel().forEach(i -> {
             float z = depth.get(i);
             float zNdc = z * 2f - 1f;
             float linear = (z < 1.0f) ? 2f * near * far / (far + near - zNdc * (far - near)) : far;
@@ -233,7 +511,7 @@ public class HighResCapture {
         });
 
         // 7x7 羽化窗口，抹平硬边
-        java.util.stream.IntStream.range(0, h).parallel().forEach(y -> {
+        IntStream.range(0, h).parallel().forEach(y -> {
             for (int x = 0; x < w; x++) {
                 float sum = 0; int count = 0;
                 for (int dx = -3; dx <= 3; dx++) {
@@ -243,7 +521,7 @@ public class HighResCapture {
                 cocTemp[y * w + x] = sum / count;
             }
         });
-        java.util.stream.IntStream.range(0, h).parallel().forEach(y -> {
+        IntStream.range(0, h).parallel().forEach(y -> {
             for (int x = 0; x < w; x++) {
                 float sum = 0; int count = 0;
                 for (int dy = -3; dy <= 3; dy++) {
@@ -257,7 +535,7 @@ public class HighResCapture {
         int SAMPLES = 16;
         float GOLDEN = 2.399963f;
 
-        java.util.stream.IntStream.range(0, h).parallel().forEach(y -> {
+        IntStream.range(0, h).parallel().forEach(y -> {
             for (int x = 0; x < w; x++) {
                 int i = y * w + x;
                 int i4 = i * 4;

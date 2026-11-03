@@ -27,6 +27,10 @@
 		{
 			"config": "camera-mod.client.mixins.json",
 			"environment": "client"
+		},
+		{
+			"config": "camera-mod.iris.mixins.json",
+			"environment": "client"
 		}
 	],
 	"depends": {

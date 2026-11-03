@@ -1,0 +1,11 @@
+{
+  "required": false,
+  "package": "com.example.camera.client.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "IrisFinalPassMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}
