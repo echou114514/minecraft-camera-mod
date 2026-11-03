@@ -58,6 +58,8 @@ public class CameraModClient implements ClientModInitializer {
 	private static int hudColor = 0xFFFFFF;
 	private static double lastDiff = 0.0;
 	private static float evComp = 0f;
+	private static boolean evAuto = true;
+	private static float totalEvOffset = 0f;
 	private static int savedGuiScale = -1;
 	private static int shutterFlashTicks = 0;
 	private static final int SHUTTER_FLASH_DURATION = 6;
@@ -193,13 +195,10 @@ public class CameraModClient implements ClientModInitializer {
 			int w = ctx.getScaledWindowWidth();
 			int h = ctx.getScaledWindowHeight();
 
-			if (Math.abs(lastDiff) >= 0.15) {
-				float exposureEV = (float) -lastDiff;
-				if (exposureEV > 5f) exposureEV = 5f;
-				if (exposureEV < -5f) exposureEV = -5f;
-				applyEvComp(w, h, exposureEV);
-			}
-			applyEvComp(w, h, evComp);
+			float previewEv = totalEvOffset;
+			if (previewEv > 5f) previewEv = 5f;
+			if (previewEv < -5f) previewEv = -5f;
+			applyEvComp(w, h, previewEv);
 			PostProcess.render(ctx, client);
 			PostProcess.renderNoise(ctx, client);
 
@@ -213,7 +212,7 @@ public class CameraModClient implements ClientModInitializer {
 
 			int bottomY = h - barY;
 			int paramY = bottomY + 60;
-			drawSingleBar(ctx, client, barX + 20, paramY, w - (barX + 20) * 2, -(lastDiff + evComp));
+			drawSingleBar(ctx, client, barX + 20, paramY, w - (barX + 20) * 2, totalEvOffset);
 
 			if (shutterFlashTicks > 0) {
 				float t = (float) shutterFlashTicks / SHUTTER_FLASH_DURATION;
@@ -267,7 +266,7 @@ public class CameraModClient implements ClientModInitializer {
 			client.player.sendMessage(Text.literal("§e[相机] 手动镜头拍摄！"), true);
 		}
 
-		HighResCapture.snapshotExposureEV = nbt.getInt("evCompStep") / 3.0f;
+		HighResCapture.snapshotExposureEV = evAuto ? (float) lastDiff : nbt.getInt("evCompStep") / 3.0f;
 		HighResCapture.snapshotMeterEV = (float) lastDiff;
 		HighResCapture.snapshotWb = cachedWb;
 		HighResCapture.snapshotSceneTemp = cachedSceneTemp;
@@ -370,6 +369,7 @@ public class CameraModClient implements ClientModInitializer {
 		boolean isoAuto = settings.getBoolean("isoAuto");
 		boolean wbAuto = settings.getBoolean("wbAuto");
 		boolean toneAuto = settings.getBoolean("toneAuto");
+		evAuto = Jishen.isEvAuto(settings);
 
 		ExposureMode mode = ExposureMode.M;
 		String modeStr = settings.getString("mode");
@@ -420,13 +420,18 @@ public class CameraModClient implements ClientModInitializer {
 		if (toneAuto) tone = 0;
 
 		PostProcess.updateIso(iso);
-		evComp = evStep / 3.0f;
 
 		double diff = Metering.exposureDiff(ap, sh, iso);
 		lastDiff = diff;
 
-		String evStr = (evComp >= 0 ? "+" : "") + String.format(Locale.US, "%.1f", evComp);
-		hudLine1 = String.format(Locale.US, "%s %s  %dmm  f/%.1f  %s  ISO%d  %dK  %sEV",
+		// Auto EV cancels the metering error entirely: the photo is exposed for
+		// the scene. Manual EV is the user's own offset and is left untouched.
+		evComp = evAuto ? (float) diff : evStep / 3.0f;
+		totalEvOffset = (float) (-diff + evComp);
+
+		String evStr = evAuto ? "EV AUTO"
+				: ((evComp >= 0 ? "+" : "") + String.format(Locale.US, "%.1f", evComp) + "EV");
+		hudLine1 = String.format(Locale.US, "%s %s  %dmm  f/%.1f  %s  ISO%d  %dK  %s",
 				mode.name, Metering.currentMode.displayName, focal, ap, Metering.formatShutter(sh), iso, wb, evStr);
 		hudLine2 = String.format(Locale.US, "场景EV:%.1f  场景色温:%dK", sceneEV, sceneTemp);
 	}
@@ -488,7 +493,11 @@ public class CameraModClient implements ClientModInitializer {
 	}
 
 	private static void drawSingleBar(DrawContext ctx, MinecraftClient client, int x, int y, int width, double activeEV) {
-		int color = 0xFFAACC77;
+		// A manual EV that pushes the exposure more than one stop away from the
+		// metered value will visibly clip; warn with red numbers instead of
+		// silently ruining the shot.
+		boolean warn = !evAuto && Math.abs(totalEvOffset) > 1.0f;
+		int color = warn ? 0xFFFF5555 : 0xFFAACC77;
 		int textScale = 3;
 		int pixelPerEv = 45;
 		int tickWidth = 2;

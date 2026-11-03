@@ -17,7 +17,16 @@ public class Jishen extends Item {
         nbt.putInt("wb", 5500);
         nbt.putInt("tone", 0);
         nbt.putFloat("focus", 10.0f);
+        nbt.putBoolean("evAuto", true);
         return nbt;
+    }
+
+    /**
+     * Cameras saved before the EV auto switch existed have no "evAuto" tag.
+     * Treat a missing flag as on, so old cameras start with correct exposure.
+     */
+    public static boolean isEvAuto(NbtCompound settings) {
+        return !settings.contains("evAuto") || settings.getBoolean("evAuto");
     }
 
     public static NbtCompound getSettings(ItemStack stack) {
