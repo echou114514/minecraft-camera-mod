@@ -127,14 +127,11 @@ public class CameraModClient implements ClientModInitializer {
 
 		WorldRenderEvents.END.register(context -> {
 			MinecraftClient client = MinecraftClient.getInstance();
-			boolean wasCapturing = HighResCapture.isActive();
-			HighResCapture.afterFrame(client);
-
-			if (wasCapturing && !HighResCapture.isActive() && !HighResCapture.isWaiting()) {
+			if (HighResCapture.consumeCompletion()) {
 				pendingShot = false;
 				return;
 			}
-			if (wasCapturing || HighResCapture.isActive() || HighResCapture.isWaiting()) return;
+			if (HighResCapture.isActive() || HighResCapture.isWaiting()) return;
 			if (!pendingShot) return;
 			pendingShot = false;
 
@@ -305,8 +302,10 @@ public class CameraModClient implements ClientModInitializer {
 		HighResCapture.snapshotDateStr = String.format(Locale.US, "%04d:%02d:%02d %02d:%02d:00",
 				today.getYear(), today.getMonthValue(), today.getDayOfMonth(), mcHour, mcMin);
 
-		HighResCapture.request();
-
+		if (!HighResCapture.request(client)) {
+			client.player.sendMessage(Text.literal("[相机] 无法创建高分辨率渲染目标；请检查显存/显卡最大纹理尺寸。"), false);
+			return;
+		}
 		var soundEvent = net.minecraft.registry.Registries.SOUND_EVENT.get(net.minecraft.util.Identifier.of("camera-mod", "shutter"));
 		if (soundEvent != null) client.player.playSound(soundEvent, 1.0f, 1.0f);
 		shutterFlashTicks = SHUTTER_FLASH_DURATION;

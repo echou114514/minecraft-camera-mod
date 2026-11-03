@@ -3,10 +3,8 @@
   "package": "com.example.camera.client.mixin",
   "compatibilityLevel": "JAVA_21",
   "client": [
-    "ExampleClientMixin",
     "GameRendererMixin",
-    "GameRendererWorldMixin",
-    "MinecraftClientMixin"
+    "CaptureResolutionMixin"
   ],
   "injectors": {
     "defaultRequire": 1

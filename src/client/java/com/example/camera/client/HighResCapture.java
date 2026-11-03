@@ -1,11 +1,11 @@
 package com.example.camera.client;
 
 import com.example.camera.client.dof.DepthOfField;
+import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gl.Framebuffer;
 import org.lwjgl.BufferUtils;
 import org.lwjgl.opengl.GL11;
-import org.lwjgl.opengl.GL30;
 
 import java.io.File;
 import java.nio.ByteBuffer;
@@ -47,25 +47,57 @@ public class HighResCapture {
     private enum State { IDLE, WAITING, CAPTURING }
     private static State state = State.IDLE;
     private static int waitFrames = 0;
-    private static Framebuffer tileFb = null;
-    private static boolean inWorldRender = false;
+    private static int restoreWidth;
+    private static int restoreHeight;
+    private static boolean resolutionChanged;
+    private static boolean restorePending;
+    private static boolean captureCompleted;
 
-    public static void setInWorldRender(boolean v) { inWorldRender = v; }
-    public static boolean isInWorldRender() { return inWorldRender; }
     public static boolean isCapturing() { return state == State.CAPTURING; }
     public static boolean isActive() { return state == State.CAPTURING; }
     public static boolean isWaiting() { return state == State.WAITING; }
+    public static boolean consumeCompletion() {
+        boolean completed = captureCompleted;
+        captureCompleted = false;
+        return completed;
+    }
 
-    public static void request() {
-        if (state != State.IDLE) return;
-        state = State.WAITING;
-        waitFrames = 3;
-        if (tileFb == null) {
-            try { tileFb = new HdrFramebuffer(FULL_W, FULL_H); } catch (Throwable t) { reset(); }
+    public static boolean request(MinecraftClient client) {
+        if (state != State.IDLE || restorePending) return false;
+        if (!RenderSystem.isOnRenderThread()) return false;
+
+        var window = client.getWindow();
+        restoreWidth = window.getFramebufferWidth();
+        restoreHeight = window.getFramebufferHeight();
+        if (FULL_W > RenderSystem.maxSupportedTextureSize() || FULL_H > RenderSystem.maxSupportedTextureSize()) {
+            return false;
+        }
+
+        try {
+            resolutionChanged = true;
+            window.setFramebufferWidth(FULL_W);
+            window.setFramebufferHeight(FULL_H);
+            client.onResolutionChanged();
+
+            Framebuffer framebuffer = client.getFramebuffer();
+            if (framebuffer.textureWidth != FULL_W || framebuffer.textureHeight != FULL_H) {
+                restoreResolution(client);
+                return false;
+            }
+            state = State.WAITING;
+            waitFrames = 1;
+            return true;
+        } catch (Throwable t) {
+            state = State.IDLE;
+            restorePending = true;
+            System.err.println("[CameraMod] 高分辨率目标创建失败，取消拍摄: " + t);
+            return false;
         }
     }
 
-    public static Framebuffer getTileFramebuffer() { return tileFb; }
+    public static void restoreAfterRender(MinecraftClient client) {
+        if (restorePending || (resolutionChanged && state == State.IDLE)) restoreResolution(client);
+    }
 
     public static void afterFrame(MinecraftClient client) {
         if (state == State.WAITING) {
@@ -74,8 +106,12 @@ public class HighResCapture {
         }
         if (state != State.CAPTURING) return;
 
-        Framebuffer fb = tileFb;
-        if (fb == null) { reset(); return; }
+        Framebuffer fb = client.getFramebuffer();
+        if (fb.textureWidth != FULL_W || fb.textureHeight != FULL_H) {
+            state = State.IDLE;
+            restorePending = true;
+            return;
+        }
 
         try {
             if (cachedColorBuf == null) {
@@ -88,23 +124,6 @@ public class HighResCapture {
                 cachedDepthBuf.clear();
                 cachedDofBuf.clear();
                 cachedPixelBuffer.clear();
-            }
-
-            // 获取真 HDR 通道 (CMP 是 colortex5)
-            int irisTexId = IrisCompat.getHdrTextureId();
-            if (irisTexId != -1) {
-                int tempFbo = GL30.glGenFramebuffers();
-                GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, tempFbo);
-                GL30.glFramebufferTexture2D(GL30.GL_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT0, GL11.GL_TEXTURE_2D, irisTexId, 0);
-                if (GL30.glCheckFramebufferStatus(GL30.GL_FRAMEBUFFER) == GL30.GL_FRAMEBUFFER_COMPLETE) {
-                    int winW = client.getWindow().getFramebufferWidth();
-                    int winH = client.getWindow().getFramebufferHeight();
-                    GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, tempFbo);
-                    GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, fb.fbo);
-                    GL30.glBlitFramebuffer(0, 0, winW, winH, 0, 0, FULL_W, FULL_H, GL11.GL_COLOR_BUFFER_BIT, GL11.GL_LINEAR);
-                    GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
-                }
-                GL30.glDeleteFramebuffers(tempFbo);
             }
 
             fb.beginRead();
@@ -129,8 +148,6 @@ public class HighResCapture {
             if (snapshotTone > 0) { toneAlpha = (float)(snapshotTone/4.0*0.12); toneColorR=1f; toneColorG=0f; toneColorB=1f; }
             else if (snapshotTone < 0) { toneAlpha = (float)(-snapshotTone/4.0*0.12); toneColorR=0f; toneColorG=1f; toneColorB=0f; }
 
-            final float MAX_HDR_VALUE = 32.0f;
-
             for (int y = 0; y < FULL_H; y++) {
                 for (int x = 0; x < FULL_W; x++) {
                     int srcY = FULL_H - 1 - y;
@@ -140,20 +157,8 @@ public class HighResCapture {
                     float gf = cachedDofBuf.get(src + 1) * exposureFactor;
                     float bf = cachedDofBuf.get(src + 2) * exposureFactor;
 
-                    if (irisTexId != -1) {
-                        // 截断到 32.0 但不做归一化
-                        rf = Math.min(rf, MAX_HDR_VALUE);
-                        gf = Math.min(gf, MAX_HDR_VALUE);
-                        bf = Math.min(bf, MAX_HDR_VALUE);
-
-                        // 暗部/中间调正常 Gamma，高光对数滚降，保留溢出值
-                        if (rf > 1.0f) rf = 1.0f + (float) Math.log10(rf); else rf = (float) Math.pow(rf, 1.0 / 2.2);
-                        if (gf > 1.0f) gf = 1.0f + (float) Math.log10(gf); else gf = (float) Math.pow(gf, 1.0 / 2.2);
-                        if (bf > 1.0f) bf = 1.0f + (float) Math.log10(bf); else bf = (float) Math.pow(bf, 1.0 / 2.2);
-                    } else {
-                        if (wbAlpha > 0) { rf = rf*(1-wbAlpha) + wbColorR*wbAlpha; gf = gf*(1-wbAlpha) + wbColorG*wbAlpha; bf = bf*(1-wbAlpha) + wbColorB*wbAlpha; }
-                        if (toneAlpha > 0) { rf = rf*(1-toneAlpha) + toneColorR*toneAlpha; gf = gf*(1-toneAlpha) + toneColorG*toneAlpha; bf = bf*(1-toneAlpha) + toneColorB*toneAlpha; }
-                    }
+                    if (wbAlpha > 0) { rf = rf*(1-wbAlpha) + wbColorR*wbAlpha; gf = gf*(1-wbAlpha) + wbColorG*wbAlpha; bf = bf*(1-wbAlpha) + wbColorB*wbAlpha; }
+                    if (toneAlpha > 0) { rf = rf*(1-toneAlpha) + toneColorR*toneAlpha; gf = gf*(1-toneAlpha) + toneColorG*toneAlpha; bf = bf*(1-toneAlpha) + toneColorB*toneAlpha; }
 
                     cachedPixelBuffer.putFloat(rf);
                     cachedPixelBuffer.putFloat(gf);
@@ -180,11 +185,29 @@ public class HighResCapture {
         } catch (Throwable t) {
             System.err.println("[CameraMod] 保存失败: " + t.getMessage());
             t.printStackTrace();
+        } finally {
+            state = State.IDLE;
+            waitFrames = 0;
+            restorePending = true;
+            captureCompleted = true;
         }
-        reset();
     }
 
-    private static void reset() { state = State.IDLE; waitFrames = 0; }
+    private static void restoreResolution(MinecraftClient client) {
+        if (!resolutionChanged) return;
+        try {
+            client.getWindow().setFramebufferWidth(restoreWidth);
+            client.getWindow().setFramebufferHeight(restoreHeight);
+            client.onResolutionChanged();
+        } catch (Throwable t) {
+            System.err.println("[CameraMod] 恢复窗口渲染尺寸失败: " + t);
+        } finally {
+            resolutionChanged = false;
+            restorePending = false;
+            state = State.IDLE;
+            waitFrames = 0;
+        }
+    }
 
     private static void applyDepthOfField(FloatBuffer src, FloatBuffer depth, FloatBuffer dst, int w, int h, float focusDist, float focalMm, float aperture, float near, float far) {
         int n = w * h;
