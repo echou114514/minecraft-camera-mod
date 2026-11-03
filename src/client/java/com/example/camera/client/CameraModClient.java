@@ -39,6 +39,7 @@ import org.joml.Matrix4f;
 import org.lwjgl.BufferUtils;
 import org.lwjgl.glfw.GLFW;
 import org.lwjgl.opengl.GL11;
+import org.lwjgl.opengl.GL30;
 
 import java.io.File;
 import java.nio.ByteBuffer;
@@ -144,10 +145,14 @@ public class CameraModClient implements ClientModInitializer {
 				int w = fb.textureWidth;
 				int h = fb.textureHeight;
 
-				fb.beginRead();
 				ByteBuffer buf = BufferUtils.createByteBuffer(w * h * 4);
-				GL11.glReadPixels(0, 0, w, h, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, buf);
-				fb.endRead();
+				int previousReadFramebuffer = GL11.glGetInteger(GL30.GL_READ_FRAMEBUFFER_BINDING);
+				try {
+					GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, fb.fbo);
+					GL11.glReadPixels(0, 0, w, h, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, buf);
+				} finally {
+					GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, previousReadFramebuffer);
+				}
 
 				short[] rgb16 = new short[w * h * 3];
 				for (int y = 0; y < h; y++) {

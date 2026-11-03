@@ -6,6 +6,7 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gl.Framebuffer;
 import org.lwjgl.BufferUtils;
 import org.lwjgl.opengl.GL11;
+import org.lwjgl.opengl.GL30;
 
 import java.io.File;
 import java.nio.ByteBuffer;
@@ -126,10 +127,19 @@ public class HighResCapture {
                 cachedPixelBuffer.clear();
             }
 
-            fb.beginRead();
-            GL11.glReadPixels(0, 0, FULL_W, FULL_H, GL11.GL_RGBA, GL11.GL_FLOAT, cachedColorBuf);
-            GL11.glReadPixels(0, 0, FULL_W, FULL_H, GL11.GL_DEPTH_COMPONENT, GL11.GL_FLOAT, cachedDepthBuf);
-            fb.endRead();
+            // Framebuffer.beginRead() binds the color texture, not an FBO. glReadPixels
+            // reads from GL_READ_FRAMEBUFFER, which is otherwise the default (often black).
+            int previousReadFramebuffer = GL11.glGetInteger(GL30.GL_READ_FRAMEBUFFER_BINDING);
+            int previousPackAlignment = GL11.glGetInteger(GL11.GL_PACK_ALIGNMENT);
+            try {
+                GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, fb.fbo);
+                GL11.glPixelStorei(GL11.GL_PACK_ALIGNMENT, 1);
+                GL11.glReadPixels(0, 0, FULL_W, FULL_H, GL11.GL_RGBA, GL11.GL_FLOAT, cachedColorBuf);
+                GL11.glReadPixels(0, 0, FULL_W, FULL_H, GL11.GL_DEPTH_COMPONENT, GL11.GL_FLOAT, cachedDepthBuf);
+            } finally {
+                GL11.glPixelStorei(GL11.GL_PACK_ALIGNMENT, previousPackAlignment);
+                GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, previousReadFramebuffer);
+            }
 
             long dofStart = System.currentTimeMillis();
             applyDepthOfField(cachedColorBuf, cachedDepthBuf, cachedDofBuf, FULL_W, FULL_H,
