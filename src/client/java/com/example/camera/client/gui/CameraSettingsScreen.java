@@ -1,12 +1,10 @@
 package com.example.camera.client.gui;
 
-import com.example.camera.ModItems;
 import com.example.camera.client.AutoExposure;
 import com.example.camera.client.ExposureMode;
 import com.example.camera.client.metering.Metering;
 import data.LensSpec;
 import item.Jishen;
-import item.Jingtou;
 
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
@@ -54,9 +52,8 @@ public class CameraSettingsScreen extends Screen {
     // 根据焦距计算最近对焦距离 (焦距越长，最近对焦距离越远)
     private float getMinFocusDistance() {
         int focal = 50; // 默认值
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.player != null && client.player.getOffHandStack().isOf(ModItems.LENS)) {
-            LensSpec spec = Jingtou.getSpec(client.player.getOffHandStack());
+        if (target != null) {
+            LensSpec spec = Jishen.getLensSpec(target);
             focal = spec.focalLength;
         }
         return Math.max(0.5f, focal / 100.0f);
@@ -94,11 +91,8 @@ public class CameraSettingsScreen extends Screen {
         toneAuto = nbt.getBoolean("toneAuto");
         focusAuto = nbt.getBoolean("focusAuto");
 
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.player != null && client.player.getOffHandStack().isOf(ModItems.LENS)) {
-            LensSpec spec = Jingtou.getSpec(client.player.getOffHandStack());
-            minAperture = spec.maxAperture;
-        }
+        LensSpec spec = Jishen.getLensSpec(stack);
+        minAperture = spec.maxAperture;
         if (aperture < minAperture) aperture = minAperture;
 
         applyModeRules();
