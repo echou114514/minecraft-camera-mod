@@ -5,6 +5,7 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gl.Framebuffer;
 import net.minecraft.text.ClickEvent;
+import net.minecraft.text.HoverEvent;
 import net.minecraft.text.MutableText;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
@@ -40,6 +41,7 @@ public class HighResCapture {
     public static int snapshotTone = 0;
     public static int snapshotIso = 100;
     public static float snapshotSensorHeight = 24.0f;
+    public static boolean snapshotFullFrame = true;
 
     public static float snapshotFocusDistance = 10f;
     public static float snapshotFocalLength = 50f;
@@ -73,6 +75,8 @@ public class HighResCapture {
     private static int captureAttempts;
     private static boolean restoreRenderHand = true;
     private static Field renderHandField;
+    /** True while the CPU post-processing worker owns the cached buffers. */
+    private static volatile boolean processing;
 
     /**
      * Number of frames to let the world render at full resolution before the
@@ -88,7 +92,7 @@ public class HighResCapture {
     public static boolean isCapturing() { return state == State.CAPTURING; }
     public static boolean isActive() { return state == State.CAPTURING; }
     public static boolean isWaiting() { return state == State.WAITING; }
-    public static boolean isBusy() { return state != State.IDLE || restorePending; }
+    public static boolean isBusy() { return state != State.IDLE || restorePending || processing; }
     public static boolean consumeCompletion() {
         boolean completed = captureCompleted;
         captureCompleted = false;
@@ -96,7 +100,7 @@ public class HighResCapture {
     }
 
     public static boolean request(MinecraftClient client) {
-        if (state != State.IDLE || restorePending) return false;
+        if (state != State.IDLE || restorePending || processing) return false;
         if (!RenderSystem.isOnRenderThread()) return false;
 
         var window = client.getWindow();
@@ -187,6 +191,10 @@ public class HighResCapture {
             return;
         }
 
+        // Reads must stay on the render thread, but the 8K DOF/tonemap pass can
+        // take many seconds. Running it here would starve the keep-alive and the
+        // integrated server drops the player ("服务器断开连接"), so the CPU work
+        // is handed to a worker thread once the buffers are filled.
         try {
             ensureBuffers();
             cachedColorBuf.clear();
@@ -209,9 +217,40 @@ public class HighResCapture {
             if (depthCaptured) {
                 System.out.println("[CameraMod] " + describeDepth(cachedDepthBuf));
             }
+        } catch (Throwable t) {
+            System.err.println("[CameraMod] 像素读取失败: " + t.getMessage());
+            t.printStackTrace();
+            state = State.IDLE;
+            waitFrames = 0;
+            restorePending = true;
+            captureCompleted = true;
+            hdrCaptured = false;
+            depthCaptured = false;
+            return;
+        }
 
+        final MinecraftClient captureClient = client;
+        final boolean captureDepth = depthCaptured;
+        final boolean captureLinear = linearScene;
+        processing = true;
+        state = State.IDLE;
+        waitFrames = 0;
+        restorePending = true;
+        captureCompleted = true;
+        hdrCaptured = false;
+        depthCaptured = false;
+
+        Thread worker = new Thread(() -> cameraMod$processCapture(captureClient, captureDepth, captureLinear),
+                "camera-mod-capture");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    /** CPU-only 8K post-processing, safe to run off the render thread. */
+    private static void cameraMod$processCapture(MinecraftClient client, boolean hasDepth, boolean linear) {
+        try {
             long dofStart = System.currentTimeMillis();
-            if (depthCaptured) {
+            if (hasDepth) {
                 applyDepthOfField(cachedColorBuf, cachedDepthBuf, cachedDofBuf, FULL_W, FULL_H,
                         snapshotFocusDistance, snapshotFocalLength, snapshotAperture, cameraNear, cameraFar);
             } else {
@@ -219,7 +258,7 @@ public class HighResCapture {
             }
             System.out.println("[CameraMod] 景深耗时: " + (System.currentTimeMillis() - dofStart) + "ms");
 
-            processToDisplay(cachedDofBuf, cachedPixelBuffer, linearScene);
+            processToDisplay(cachedDofBuf, cachedPixelBuffer, linear);
             cachedPixelBuffer.position(0);
 
             File dir = new File(client.runDirectory, "screenshots");
@@ -232,21 +271,23 @@ public class HighResCapture {
                     snapshotWb, snapshotMeteringMode, snapshotExposureProgram, snapshotExposureMode,
                     snapshotWbAuto, snapshotLensName, snapshotCamName, snapshotDateStr);
 
-            if (client.player != null) {
-                client.player.sendMessage(cameraMod$fileMessage(file, name), false);
-            }
+            System.out.println("[CameraMod] 已保存: " + file.getAbsolutePath());
+            client.execute(() -> {
+                if (client.player != null) {
+                    client.player.sendMessage(cameraMod$fileMessage(file, name), false);
+                }
+            });
             System.gc();
-
         } catch (Throwable t) {
             System.err.println("[CameraMod] 保存失败: " + t.getMessage());
             t.printStackTrace();
+            client.execute(() -> {
+                if (client.player != null) {
+                    client.player.sendMessage(Text.literal("§c[相机] 保存失败: " + t.getMessage()), false);
+                }
+            });
         } finally {
-            state = State.IDLE;
-            waitFrames = 0;
-            restorePending = true;
-            captureCompleted = true;
-            hdrCaptured = false;
-            depthCaptured = false;
+            processing = false;
         }
     }
 
@@ -259,8 +300,10 @@ public class HighResCapture {
         MutableText link = Text.literal(name).styled(style -> style
                 .withColor(Formatting.AQUA)
                 .withUnderline(true)
-                .withClickEvent(new ClickEvent(ClickEvent.Action.OPEN_FILE, file.getAbsolutePath())));
-        return Text.literal("[相机] 20MP TIFF: ").append(link);
+                .withClickEvent(new ClickEvent(ClickEvent.Action.OPEN_FILE, file.getAbsolutePath()))
+                .withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT,
+                        Text.literal(file.getAbsolutePath()))));
+        return Text.literal("[相机] 20MP TIFF · screenshots/ ").append(link);
     }
 
     private static String describeDepth(FloatBuffer depth) {
@@ -342,14 +385,17 @@ public class HighResCapture {
         gGain *= 1f - 0.08f * toneT;
         bGain *= 1f + 0.08f * toneT;
 
-        double noiseSigma = PostProcess.computeLumaNoise(snapshotIso, true);
+        double noiseSigma = PostProcess.computeLumaNoise(snapshotIso, snapshotFullFrame);
+        double chromaSigma = PostProcess.computeChromaNoise(snapshotIso, snapshotFullFrame);
         boolean addNoise = noiseSigma > 0.0001;
+        boolean addChroma = chromaSigma > 0.0001;
 
         final float exp = exposure;
         final float rg = rGain;
         final float gg = gGain;
         final float bg = bGain;
         final float ns = (float) noiseSigma;
+        final float cs = (float) chromaSigma;
 
         IntStream.range(0, FULL_H).parallel().forEach(y -> {
             int srcY = FULL_H - 1 - y;
@@ -371,6 +417,19 @@ public class HighResCapture {
                     r += n;
                     g += n;
                     b += n;
+
+                    if (addChroma) {
+                        // 3×3 粗网格：同一块内的色度噪声相同，模拟去马赛克后的
+                        // 低频彩色噪点；三项在亮度上相加为 0，不改变曝光。
+                        int bx = (x / 3) * 3 + 17;
+                        int by = (y / 3) * 3 + 29;
+                        float cr = hashNoise(bx, by);
+                        float cb = hashNoise(bx + 71, by + 53);
+                        float amp = cs * luma;
+                        r += cr * amp;
+                        g -= (cr + cb) * 0.5f * amp;
+                        b += cb * amp;
+                    }
                 }
 
                 if (linear) {
@@ -408,6 +467,13 @@ public class HighResCapture {
         int h = x * 374761393 + y * 668265263;
         h = (h ^ (h >>> 13)) * 1274126177;
         return ((h ^ (h >>> 16)) & 0xFFFF) / 65535f - 0.5f;
+    }
+
+    private static float hash01(int x, int y) {
+        int h = x * 73856093 ^ y * 19349663;
+        h ^= (h >>> 13);
+        h *= 1274126177;
+        return ((h ^ (h >>> 16)) & 0xFFFF) / 65535f;
     }
 
     private static float aces(float x) {
@@ -507,7 +573,7 @@ public class HighResCapture {
             float zNdc = z * 2f - 1f;
             float linear = (z < 1.0f) ? 2f * near * far / (far + near - zNdc * (far - near)) : far;
             float c = DepthOfField.computeCocPixels(linear, focusDist, focalMm, aperture, h, snapshotSensorHeight);
-            coc[i] = DepthOfField.clampCoc(c, h);
+            coc[i] = DepthOfField.softKnee(DepthOfField.clampCoc(c, h));
         });
 
         // 7x7 羽化窗口，抹平硬边
@@ -532,7 +598,6 @@ public class HighResCapture {
             }
         });
 
-        int SAMPLES = 16;
         float GOLDEN = 2.399963f;
 
         IntStream.range(0, h).parallel().forEach(y -> {
@@ -546,16 +611,19 @@ public class HighResCapture {
                     continue;
                 }
 
-                float centerW = Math.max(0.02f, 1.0f / radius);
-                float r = src.get(i4) * centerW;
-                float g = src.get(i4+1) * centerW;
-                float b = src.get(i4+2) * centerW;
-                float wSum = centerW;
+                // 均匀圆盘采样 + 每像素随机旋转。固定角度的螺旋采样会在高反差
+                // 边缘留下同心圆环；逐像素旋转把环打散成不相关的颗粒。
+                float rot = hash01(x, y) * 6.2831853f;
+                float r = src.get(i4);
+                float g = src.get(i4+1);
+                float b = src.get(i4+2);
+                float wSum = 1f;
 
-                for (int s = 1; s <= SAMPLES; s++) {
-                    float t = (float) s / SAMPLES;
+                int samples = radius < 4f ? 8 : (radius < 16f ? 12 : 16);
+                for (int s = 0; s < samples; s++) {
+                    float t = (s + 0.5f) / samples;
                     float sr = radius * (float) Math.sqrt(t);
-                    float st = s * GOLDEN;
+                    float st = s * GOLDEN + rot;
                     int sx = x + Math.round((float) (Math.cos(st) * sr));
                     int sy = y + Math.round((float) (Math.sin(st) * sr));
 
@@ -572,7 +640,7 @@ public class HighResCapture {
                     float sampleW = 1.0f;
                     if (sCoc < 0f && sCocAbs * sCocAbs < d2) {
                         float leak = (sCocAbs * sCocAbs) / (d2 + 1.0f);
-                        sampleW = Math.max(0.15f, leak * 0.85f); // 增大泄漏权重，软糯边缘
+                        sampleW = Math.max(0.15f, leak * 0.85f);
                     }
 
                     r += src.get(si4) * sampleW;
