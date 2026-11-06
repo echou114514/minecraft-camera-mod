@@ -32,6 +32,9 @@ bin/
 
 run/
 
+# local cache for the dev-client test mods/shader (see build.gradle)
+dev-mods/
+
 # java
 
 hs_err_*.log

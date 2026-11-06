@@ -77,4 +77,17 @@
 2. 将本模组与上述三个前置模组一同放入 `.minecraft/mods` 文件夹。
 3. **运行警告**：生成单张 8K TIFF 文件约占用 400 MiB 硬盘空间，运行期间建议至少分配6GiB内存或显存。按下快门后，CPU 执行景深计算与图像文件写入操作会导致主线程阻塞（根据硬件性能，耗时通常在数秒至十数秒之间），此期间客户端画面将冻结并显示纯色画面，属预期渲染行为，并非卡死，请等待保存完成。
 
+## 开发环境（`gradlew runClient`）
+> **当前状态：暂停。** Iris 在 dev 环境的 Mixin refmap 重映射存在缺陷，`runClient` 会在启动时崩溃；详见 [TODO.md](TODO.md)。以下配置已完成，等该问题解决后即可使用。
+
+`./gradlew runClient` 会自动准备一套接近实机的测试环境：
+
+- **运行时依赖**：Iris 1.8.14-beta.1、Sodium 0.8.13-beta.1、Distant Horizons 3.3.3 通过 `modRuntimeOnly` 由 Loom 重映射后加载；它们只用于开发环境，不会打进发布 jar。
+- **测试光影**：Complementary Reimagined r5.9.3，自动放进 `run/shaderpacks`，并写入 `run/config/iris.properties` 预选。
+- **HDR 读取目标**：该 run 配置固定为 `colortex0`（Complementary 在 tonemap 前的线性缓冲）。Eclipse 仍使用默认的 `colortex5`；可用 `-Dcameramod.irisHdrTarget=N` 覆盖，`-1` 表示禁用。
+
+网络慢时可以把 jar / 光影 zip 预先放进项目根目录的 `dev-mods/`（已 gitignore），`prepareDevRun` 会优先使用本地缓存而不是重新下载。
+
+`run/` 与 `dev-mods/` 都不进版本库；删除 `run/config/iris.properties` 可让游戏内重新选择光影包。
+
 !!!!!最重要的一点!!!!!：玩得开心！

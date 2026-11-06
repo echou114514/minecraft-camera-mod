@@ -1,0 +1,2 @@
+./gradlew compileClientJava && ./gradlew runClient
+
