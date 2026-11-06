@@ -119,3 +119,51 @@ python3 refrence/build-tools/convert_bbmodel.py            # 需要时重生成�
 `CameraModClient.java` `PostProcess.java` `CameraSettingsScreen.java` `lang/zh_cn.json`；新增：`hud/` `render/`
 `geo/` `animations/` `models/item/lumin_*.json` `textures/item/lumin_*.png` `recipe/lumin_*.json`
 `PROGRESS.md` `TODO.md`；删除：旧 `camera_body.*`。
+
+---
+
+## 2026-11-06 更新（本轮）
+
+分支：`feat/lumin-body` → `feat/viewfinder-hud` → `feat/snapmatica-optics` → `chore/dev-docs`，
+已 fast-forward 合并进 `master` / `main`（`9f950d0`）。
+
+### 取景器 HUD
+
+- 底部参数轨现在能正常显示：`InGameHudMixin` 在取景时取消 `renderMainHud` /
+  `renderCrosshair`，热键栏不再压在参数轨上（之前所谓「还是老 UI」就是热键栏+准星）。
+- 尺寸改为按 **GUI 坐标**绘制（`DESIGN_TO_GUI = 0.45`），随「界面大小」设置同步缩放，
+  不再只跟物理分辨率走。
+- 键位：`↑/↓` 切模式、`[` `]` 切参数、`←/→` 调数值。**移除滚轮切参数的 mixin**。
+- 参数值显示为「参数名 + 数值」（曝光 AUTO、ISO 400、快门 1/125 …）。
+
+### 圆形半透明波纹（已定位并修复）
+
+根因是 `DrawContext.drawTexture` 的最后两个参数是 **UV 归一化用的纹理尺寸**；
+原来传 `128`，而目标是 1920 宽 → UV `0..15`，暗角贴图被平铺成 15×8 个圆。
+改为传目标宽高（UV `0..1`），并把暗角贴图提到 512² + Bayer 抖动打散色阶。
+`PostProcess` 的 1/3 分辨率色度噪声同理，避免平铺。
+
+### AUTO 夜间曝光 / 噪声
+
+- 用 Snapmatica 式「预算搜索」替换 `AutoExposure` 的阈值分段：曝光误差优先，
+  其次压低 ISO，再优先用慢快门（游戏无机震），光圈偏好 f/4。AUTO 上限 4s，
+  全画幅 ISO 上限 6400、半画幅 3200。
+- `PostProcess` 换用 ISO→噪声表 + 画幅裁切系数（全幅 ×1.0 / 半幅 ×1.5），
+  色度噪声改成 1/3 分辨率低频纹理；预览在 ISO 100 也铺极淡颗粒打散天色条带。
+- `DepthOfField` 换薄透镜 CoC（f²·|S2−S1| / S2·N·(S1−f)）+ 艾里斑平方和 + 软膝，
+  世界尺度 `-Dcameramod.mmPerBlock`（默认 375 mm/方块）；散景采样逐像素随机旋转，
+  消除同心圆环。
+
+### 8K 拍摄「服务器断开连接」
+
+- 原因：8K 的 DOF + 色调映射 + TIFF 写盘全在渲染线程同步跑，阻塞久了整合服务器
+  看门狗把玩家踢下线（单人也会显示「连接丢失」）。
+- 现在 GL 读回仍在渲染线程，CPU 后处理移到 `camera-mod-capture` 工作线程；
+  处理期间 `request()` 拒绝新拍摄（缓存 buffer 独占）。
+- 保存提示改为 `20MP TIFF · screenshots/ <文件名>`，悬停显示绝对路径，点击直接打开。
+  文件所在目录：实例的 `screenshots/`（dev 环境是 `run/screenshots/`）。
+
+### 仍未做
+
+- 长曝光逐帧累加（TODO 第 3 条），目前只是把快门/ISO 当参数与噪声依据。
+- Iris dev 环境仍未接（见本文开头阻塞点）。
