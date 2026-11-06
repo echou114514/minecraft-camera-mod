@@ -18,6 +18,7 @@ public class CameraMod implements ModInitializer {
 	@Override
 	public void onInitialize() {
 		ModItems.register();
+		ModItemGroups.register();
 		ModRecipes.register();
 		LOGGER.info("[CameraMod] 相机模组加载成功！");
 	}
