@@ -20,6 +20,8 @@ public class PostProcess {
     private static Identifier[] chromaTextures;
     private static int noiseW = 0;
     private static int noiseH = 0;
+    private static int chromaW = 0;
+    private static int chromaH = 0;
     private static boolean initialized = false;
     private static int frameCounter = 0;
 
@@ -74,10 +76,16 @@ public class PostProcess {
             client.getTextureManager().registerTexture(lid, lumaTex);
             lumaTextures[f] = lid;
 
-            NativeImage chromaImg = new NativeImage(noiseW, noiseH, false);
+            // 色度噪声在 1/3 分辨率生成，再靠 GPU 双线性放大：模拟去马赛克后
+            // 低频、成团的彩色噪点，而不是逐像素的彩点。
+            if (chromaW == 0 || chromaH == 0) {
+                chromaW = Math.max(1, (noiseW + 2) / 3);
+                chromaH = Math.max(1, (noiseH + 2) / 3);
+            }
+            NativeImage chromaImg = new NativeImage(chromaW, chromaH, false);
             Random cr = new Random(f * 67890L);
-            for (int y = 0; y < noiseH; y++) {
-                for (int x = 0; x < noiseW; x++) {
+            for (int y = 0; y < chromaH; y++) {
+                for (int x = 0; x < chromaW; x++) {
                     int c = cr.nextInt(6);
                     int r_, g_, b_;
                     switch (c) {
@@ -88,8 +96,7 @@ public class PostProcess {
                         case 4  -> { r_ = 255; g_ = 0;   b_ = 255; }
                         default -> { r_ = 0;   g_ = 255; b_ = 255; }
                     }
-                    int a = cr.nextInt(256);
-                    chromaImg.setColor(x, y, (a << 24) | (r_ << 16) | (g_ << 8) | b_);
+                    chromaImg.setColor(x, y, 0xFF000000 | (r_ << 16) | (g_ << 8) | b_);
                 }
             }
             NativeImageBackedTexture chromaTex = new NativeImageBackedTexture(chromaImg);
@@ -103,7 +110,7 @@ public class PostProcess {
     public static void render(DrawContext ctx, MinecraftClient client) {
         if (client.player == null) return;
         ItemStack body = client.player.getMainHandStack();
-        if (!body.isOf(ModItems.CAMERA_BODY)) return;
+        if (!Jishen.isCamera(body)) return;
 
         NbtCompound nbt = Jishen.getSettings(body);
         int tone = nbt.getInt("tone");
@@ -128,13 +135,17 @@ public class PostProcess {
         }
 
         ItemStack body = client.player.getMainHandStack();
-        if (!body.isOf(ModItems.CAMERA_BODY)) return;
-        if (!client.player.getOffHandStack().isOf(ModItems.LENS)) return;
+        if (!Jishen.isCamera(body)) return;
+        if (!Jishen.hasLens(body)) return;
 
         int iso = currentIso;
-        double luma   = computeLumaNoise(iso, true);
-        double chroma = computeChromaNoise(iso, true);
-        if (luma <= 0 && chroma <= 0) return;
+        boolean fullFrame = Jishen.isFullFrame(body);
+        double luma = computeLumaNoise(iso, fullFrame);
+        double chroma = computeChromaNoise(iso, fullFrame);
+
+        // 即便 ISO 100 也铺极淡的一层颗粒：把 8 位天色渐变里的条带打散，
+        // 夜景那种「一圈一圈/一条一条」的假色阶就不会出现。
+        luma = Math.max(luma, 0.004);
 
         int scaledW = ctx.getScaledWindowWidth();
         int scaledH = ctx.getScaledWindowHeight();
@@ -142,13 +153,13 @@ public class PostProcess {
 
         RenderSystem.enableBlend();
 
-        if (luma > 0) {
-            RenderSystem.setShaderColor(1f, 1f, 1f, (float) luma);
-            ctx.drawTexture(lumaTextures[frame], 0, 0, 0, 0, scaledW, scaledH, noiseW, noiseH);
-        }
-        if (chroma > 0) {
+        RenderSystem.setShaderColor(1f, 1f, 1f, (float) luma);
+        ctx.drawTexture(lumaTextures[frame], 0, 0, 0, 0, scaledW, scaledH, scaledW, scaledH);
+
+        if (chroma > 0.0001) {
             RenderSystem.setShaderColor(1f, 1f, 1f, (float) chroma);
-            ctx.drawTexture(chromaTextures[frame], 0, 0, 0, 0, scaledW, scaledH, noiseW, noiseH);
+            // 色度贴图只有 1/3 分辨率，UV 归一化必须用目标宽高，否则会平铺。
+            ctx.drawTexture(chromaTextures[frame], 0, 0, 0, 0, scaledW, scaledH, scaledW, scaledH);
         }
 
         RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
@@ -181,21 +192,42 @@ public class PostProcess {
         }
     }
 
-    public static double computeLumaNoise(int iso, boolean fullFrame) {
-        double k = fullFrame ? 1.0 : 0.5;
-        if (iso <= 600 * k)   return 0.00000;
-        if (iso <= 800 * k)   return 0.00210;
-        if (iso <= 1600 * k)  return 0.00630;
-        if (iso <= 3200 * k)  return 0.01260;
-        if (iso <= 6400 * k)  return 0.02240;
-        if (iso <= 12800 * k) return 0.03430;
-        return 0.04900;
+    /** 全画幅 / 半画幅裁切系数：小底同 ISO 更噪。 */
+    public static double cropFactor(boolean fullFrame) {
+        return fullFrame ? 1.0 : 1.5;
     }
 
+    /**
+     * Snapmatica 的 ISO→亮度噪声表（单位：8 位灰阶）。100 时干净，之后按 1/3
+     * 档快速上升；再乘画幅裁切系数实现「等效 ISO」。
+     */
+    private static double isoToNoiseSigma(int iso) {
+        if (iso <= 100) return 0.0;
+        if (iso <= 200) return 1.5;
+        if (iso <= 400) return 3.0;
+        if (iso <= 800) return 6.0;
+        if (iso <= 1600) return 11.0;
+        if (iso <= 3200) return 18.0;
+        if (iso <= 6400) return 28.0;
+        if (iso <= 12800) return 42.0;
+        return 60.0;
+    }
+
+    /** 亮度噪声幅度（0..1），HUD 和成片共用。 */
+    public static double computeLumaNoise(int iso, boolean fullFrame) {
+        // 0.65：叠加贴图自身的随机 alpha 会再放大一次幅度，这里校准到
+        // 「ISO 3200 全画幅约 ±3 个 8 位灰阶」的观感。
+        return (isoToNoiseSigma(iso) / 255.0) * Math.max(0.2, cropFactor(fullFrame)) * 0.65;
+    }
+
+    /**
+     * 色度噪声幅度：低 ISO 几乎没有，高 ISO 逐渐接近亮度噪声。成片里按 3×3
+     * 粗网格生成，模拟去马赛克带来的空间相关性。
+     */
     public static double computeChromaNoise(int iso, boolean fullFrame) {
-        double k = fullFrame ? 1.0 : 0.5;
-        if (iso < 6400 * k)   return 0.000;
-        if (iso <= 12800 * k) return 0.070;
-        return 0.176;
+        double luma = computeLumaNoise(iso, fullFrame);
+        double stops = Math.max(0.0, Math.log(iso / 100.0) / Math.log(2.0));
+        double ratio = Math.min(0.80, 0.15 + 0.085 * stops);
+        return luma * ratio;
     }
 }

@@ -1,12 +1,17 @@
 pluginManagement {
-	repositories {
-		maven {
-			name = 'Fabric'
-			url = 'https://maven.fabricmc.net/'
-		}
-		mavenCentral()
-		gradlePluginPortal()
-	}
+    repositories {
+        // Hanbing 代理仓库，用于加速插件解析
+        maven {
+            name = 'Hanbing\'s proxy maven'
+            url = 'https://repository.hanbings.io/proxy/'
+        }
+        // 官方 Fabric 仓库，作为后备
+        maven {
+            name = 'Fabric'
+            url = 'https://maven.fabricmc.net/'
+        }
+        gradlePluginPortal()
+    }
 }
 
 // Should match your modid

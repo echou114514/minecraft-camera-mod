@@ -27,12 +27,17 @@
 		{
 			"config": "camera-mod.client.mixins.json",
 			"environment": "client"
+		},
+		{
+			"config": "camera-mod.iris.mixins.json",
+			"environment": "client"
 		}
 	],
 	"depends": {
 		"fabricloader": ">=0.19.5",
 		"minecraft": "~1.21.1",
 		"java": ">=21",
-		"fabric-api": "*"
+		"fabric-api": "*",
+		"geckolib": ">=4.8.4"
 	}
 }

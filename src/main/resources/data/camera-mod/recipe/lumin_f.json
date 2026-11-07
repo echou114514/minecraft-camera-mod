@@ -1,0 +1,16 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "pattern": [
+    " B ",
+    "ICI",
+    "GRG"
+  ],
+  "key": {
+    "B": { "item": "minecraft:stone_button" },
+    "I": { "item": "minecraft:iron_block" },
+    "C": { "item": "camera-mod:full_frame_cmos" },
+    "G": { "item": "minecraft:glass" },
+    "R": { "item": "minecraft:redstone_block" }
+  },
+  "result": { "id": "camera-mod:lumin_f", "count": 1 }
+}

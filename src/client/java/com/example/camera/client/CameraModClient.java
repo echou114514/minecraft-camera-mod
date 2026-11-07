@@ -2,17 +2,20 @@ package com.example.camera.client;
 
 import com.example.camera.ModItems;
 import com.example.camera.client.gui.CameraSettingsScreen;
+import com.example.camera.client.hud.CameraHud;
+import com.example.camera.client.hud.HudSnapshot;
 import com.example.camera.client.metering.Metering;
+import com.example.camera.client.render.CameraItemRenderer;
 import com.mojang.blaze3d.platform.GlStateManager;
 import com.mojang.blaze3d.systems.RenderSystem;
 import data.LensSpec;
-import item.Jingtou;
 import item.Jishen;
 
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
+import net.fabricmc.fabric.api.client.rendering.v1.BuiltinItemRendererRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.fabricmc.fabric.api.event.player.UseItemCallback;
 import net.minecraft.client.MinecraftClient;
@@ -39,6 +42,7 @@ import org.joml.Matrix4f;
 import org.lwjgl.BufferUtils;
 import org.lwjgl.glfw.GLFW;
 import org.lwjgl.opengl.GL11;
+import org.lwjgl.opengl.GL30;
 
 import java.io.File;
 import java.nio.ByteBuffer;
@@ -52,14 +56,22 @@ public class CameraModClient implements ClientModInitializer {
 
 	private static boolean pendingShot = false;
 	private static boolean cameraMode = false;
-	private static String hudLine1 = "";
-	private static String hudLine2 = "";
-	private static int hudColor = 0xFFFFFF;
 	private static double lastDiff = 0.0;
 	private static float evComp = 0f;
-	private static int savedGuiScale = -1;
+	private static boolean evAuto = true;
+	private static float totalEvOffset = 0f;
 	private static int shutterFlashTicks = 0;
 	private static final int SHUTTER_FLASH_DURATION = 6;
+
+	// ---- HUD (取景器) ----
+	/** 0=自动 1=照片 2=人像 3=夜景 4=电影，持久化在相机 NBT 的 hudMode。 */
+	private static int hudMode = 0;
+	private static int hudParam = 0;
+	/** 安装动画期间保持手持模型可见（1.5s 动画约 30 tick）。 */
+	private static int installAnimTicks = 0;
+	private static int hudAdjustCooldown = 0;
+	private static int hudParamCooldown = 0;
+	private static final HudSnapshot HUD = new HudSnapshot();
 
 	public static int cachedWb = 5500;
 	public static int cachedSceneTemp = 5500;
@@ -86,24 +98,48 @@ public class CameraModClient implements ClientModInitializer {
 		zoomOutKey = KeyBindingHelper.registerKeyBinding(new KeyBinding("key.camera-mod.zoom_out", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_DOWN, "category.camera-mod"));
 		meteringKey = KeyBindingHelper.registerKeyBinding(new KeyBinding("key.camera-mod.metering", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_M, "category.camera-mod"));
 
+		CameraItemRenderer cameraRenderer = new CameraItemRenderer();
+		BuiltinItemRendererRegistry.DynamicItemRenderer itemRenderer = cameraRenderer::render;
+		BuiltinItemRendererRegistry.INSTANCE.register(ModItems.LUMIN_F, itemRenderer);
+		BuiltinItemRendererRegistry.INSTANCE.register(ModItems.LUMIN_H, itemRenderer);
+
 		UseItemCallback.EVENT.register((player, world, hand) -> {
 			ItemStack stack = player.getStackInHand(hand);
-			if (world.isClient() && stack.isOf(ModItems.CAMERA_BODY)) {
-				CameraSettingsScreen.open(stack);
-				return TypedActionResult.success(stack);
+			if (Jishen.isCamera(stack)) {
+				// Installing takes priority: let the server-side use() write the
+				// assembly NBT and play the animation.
+				if (Jishen.installAction(stack, player.getOffHandStack()) != null) {
+					if (world.isClient()) {
+						// Predict the assembly so the lens bone is already visible
+						// while the install animation plays; the server confirms it
+						// and consumes the offhand lens.
+						Jishen.installLens(stack, player.getOffHandStack());
+						installAnimTicks = 36;
+					}
+					return TypedActionResult.pass(stack);
+				}
+				if (world.isClient() && Jishen.isReady(stack)) {
+					CameraSettingsScreen.open(stack);
+					return TypedActionResult.success(stack);
+				}
 			}
 			return TypedActionResult.pass(stack);
 		});
 
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
 			applyLensFov(client);
-			applyCameraGuiScale(client);
 			tickMetering(client);
 			if (shutterFlashTicks > 0) shutterFlashTicks--;
+			if (installAnimTicks > 0) installAnimTicks--;
+
+			if (cameraMode) {
+				CameraHud.tick(0.05f);
+			} else {
+				CameraHud.reset();
+			}
+			tickHudInput(client);
 
 			if (client.currentScreen == null) {
-				while (zoomInKey.wasPressed()) adjustZoom(1);
-				while (zoomOutKey.wasPressed()) adjustZoom(-1);
 				while (meteringKey.wasPressed()) cycleMeteringMode(client);
 				while (shutterKey.wasPressed()) onShutterPressed(client);
 			}
@@ -127,14 +163,11 @@ public class CameraModClient implements ClientModInitializer {
 
 		WorldRenderEvents.END.register(context -> {
 			MinecraftClient client = MinecraftClient.getInstance();
-			boolean wasCapturing = HighResCapture.isActive();
-			HighResCapture.afterFrame(client);
-
-			if (wasCapturing && !HighResCapture.isActive() && !HighResCapture.isWaiting()) {
+			if (HighResCapture.consumeCompletion()) {
 				pendingShot = false;
 				return;
 			}
-			if (wasCapturing || HighResCapture.isActive() || HighResCapture.isWaiting()) return;
+			if (HighResCapture.isActive() || HighResCapture.isWaiting()) return;
 			if (!pendingShot) return;
 			pendingShot = false;
 
@@ -147,10 +180,14 @@ public class CameraModClient implements ClientModInitializer {
 				int w = fb.textureWidth;
 				int h = fb.textureHeight;
 
-				fb.beginRead();
 				ByteBuffer buf = BufferUtils.createByteBuffer(w * h * 4);
-				GL11.glReadPixels(0, 0, w, h, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, buf);
-				fb.endRead();
+				int previousReadFramebuffer = GL11.glGetInteger(GL30.GL_READ_FRAMEBUFFER_BINDING);
+				try {
+					GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, fb.fbo);
+					GL11.glReadPixels(0, 0, w, h, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, buf);
+				} finally {
+					GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, previousReadFramebuffer);
+				}
 
 				short[] rgb16 = new short[w * h * 3];
 				for (int y = 0; y < h; y++) {
@@ -183,32 +220,24 @@ public class CameraModClient implements ClientModInitializer {
 		});
 
 		HudRenderCallback.EVENT.register((DrawContext ctx, RenderTickCounter tickCounter) -> {
+			// The capture reads the frame after the world but before this callback
+			// finishes, so never let camera overlays or noise leak into the photo.
+			if (HighResCapture.isWaiting() || HighResCapture.isCapturing()) return;
 			if (!cameraMode) return;
 			MinecraftClient client = MinecraftClient.getInstance();
 			int w = ctx.getScaledWindowWidth();
 			int h = ctx.getScaledWindowHeight();
 
-			if (Math.abs(lastDiff) >= 0.15) {
-				float exposureEV = (float) -lastDiff;
-				if (exposureEV > 5f) exposureEV = 5f;
-				if (exposureEV < -5f) exposureEV = -5f;
-				applyEvComp(w, h, exposureEV);
-			}
-			applyEvComp(w, h, evComp);
+			float previewEv = totalEvOffset;
+			if (previewEv > 5f) previewEv = 5f;
+			if (previewEv < -5f) previewEv = -5f;
+			applyEvComp(w, h, previewEv);
 			PostProcess.render(ctx, client);
 			PostProcess.renderNoise(ctx, client);
 
-			int barX = (int) (w * 0.15);
-			int barY = (int) (h * 0.15);
-			int black = 0xFF000000;
-			ctx.fill(0, 0, barX, h, black);
-			ctx.fill(w - barX, 0, w, h, black);
-			ctx.fill(barX, 0, w - barX, barY, black);
-			ctx.fill(barX, h - barY, w - barX, h, black);
-
-			int bottomY = h - barY;
-			int paramY = bottomY + 60;
-			drawSingleBar(ctx, client, barX + 20, paramY, w - (barX + 20) * 2, -(lastDiff + evComp));
+			// 无边框取景器 HUD：顶部状态、左侧模式、底部参数轨。
+			fillHudSnapshot(client);
+			CameraHud.render(ctx, client, HUD);
 
 			if (shutterFlashTicks > 0) {
 				float t = (float) shutterFlashTicks / SHUTTER_FLASH_DURATION;
@@ -223,8 +252,9 @@ public class CameraModClient implements ClientModInitializer {
 		if (isFocusing) return;
 		if (client.player == null || client.world == null || !cameraMode) return;
 
-		ItemStack offHand = client.player.getOffHandStack();
-		LensSpec spec = Jingtou.getSpec(offHand);
+		ItemStack mainHand = client.player.getMainHandStack();
+		LensSpec spec = Jishen.getLensSpec(mainHand);
+		Jishen.playAnimation(mainHand, Jishen.ANIM_SHUTTER);
 
 		if (spec.autoFocus) {
 			isFocusing = true;
@@ -239,8 +269,7 @@ public class CameraModClient implements ClientModInitializer {
 		if (client.player == null || client.world == null || !cameraMode) return;
 
 		ItemStack mainHand = client.player.getMainHandStack();
-		ItemStack offHand = client.player.getOffHandStack();
-		LensSpec spec = Jingtou.getSpec(offHand);
+		LensSpec spec = Jishen.getLensSpec(mainHand);
 		NbtCompound nbt = Jishen.getSettings(mainHand);
 
 		if (spec.autoFocus) {
@@ -262,7 +291,8 @@ public class CameraModClient implements ClientModInitializer {
 			client.player.sendMessage(Text.literal("§e[相机] 手动镜头拍摄！"), true);
 		}
 
-		HighResCapture.snapshotExposureEV = nbt.getInt("evCompStep") / 3.0f;
+		HighResCapture.snapshotExposureEV = evAuto ? (float) lastDiff : nbt.getInt("evCompStep") / 3.0f;
+		HighResCapture.snapshotMeterEV = (float) lastDiff;
 		HighResCapture.snapshotWb = cachedWb;
 		HighResCapture.snapshotSceneTemp = cachedSceneTemp;
 		HighResCapture.snapshotTone = cachedTone;
@@ -271,6 +301,8 @@ public class CameraModClient implements ClientModInitializer {
 		HighResCapture.snapshotAperture = cachedAperture;
 		HighResCapture.snapshotFocusDistance = nbt.getFloat("focus");
 		HighResCapture.snapshotFocalLength = spec.focalLength;
+		HighResCapture.snapshotSensorHeight = Jishen.getSensorHeight(mainHand);
+		HighResCapture.snapshotFullFrame = Jishen.isFullFrame(mainHand);
 
 		boolean isFullFrame = HighResCapture.snapshotSensorHeight == 24.0f;
 		HighResCapture.snapshotCamName = isFullFrame ? "MC DSLR F" : "MC DSLR H";
@@ -305,8 +337,10 @@ public class CameraModClient implements ClientModInitializer {
 		HighResCapture.snapshotDateStr = String.format(Locale.US, "%04d:%02d:%02d %02d:%02d:00",
 				today.getYear(), today.getMonthValue(), today.getDayOfMonth(), mcHour, mcMin);
 
-		HighResCapture.request();
-
+		if (!HighResCapture.request(client)) {
+			client.player.sendMessage(Text.literal("[相机] 无法创建高分辨率渲染目标；请检查显存/显卡最大纹理尺寸。"), false);
+			return;
+		}
 		var soundEvent = net.minecraft.registry.Registries.SOUND_EVENT.get(net.minecraft.util.Identifier.of("camera-mod", "shutter"));
 		if (soundEvent != null) client.player.playSound(soundEvent, 1.0f, 1.0f);
 		shutterFlashTicks = SHUTTER_FLASH_DURATION;
@@ -315,33 +349,254 @@ public class CameraModClient implements ClientModInitializer {
 
 	private static void applyLensFov(MinecraftClient client) {
 		if (client.player == null) return;
-		cameraMode = client.player.getMainHandStack().isOf(ModItems.CAMERA_BODY) && client.player.getOffHandStack().isOf(ModItems.LENS);
+		ItemStack mainHand = client.player.getMainHandStack();
+		boolean wasCamera = cameraMode;
+		cameraMode = Jishen.isReady(mainHand);
 		if (cameraMode) {
-			LensSpec spec = Jingtou.getSpec(client.player.getOffHandStack());
+			LensSpec spec = Jishen.getLensSpec(mainHand);
 			CameraFovState.setCustomFov(computeFov(spec.focalLength));
+			if (!wasCamera) {
+				NbtCompound settings = Jishen.getSettings(mainHand);
+				if (settings.contains("hudMode")) {
+					hudMode = settings.getInt("hudMode");
+				} else {
+					setHudMode(client, 0);
+				}
+				CameraHud.reset();
+			}
 		} else {
 			CameraFovState.clear();
 		}
 	}
 
-	private static void applyCameraGuiScale(MinecraftClient client) {
-		boolean inCamera = cameraMode && client.currentScreen == null;
-		if (inCamera) {
-			if (savedGuiScale == -1) savedGuiScale = client.options.getGuiScale().getValue();
-			if (client.options.getGuiScale().getValue() != 1) {
-				client.options.getGuiScale().setValue(1);
-				client.onResolutionChanged();
-			}
+	public static boolean isViewfinderActive() {
+		MinecraftClient client = MinecraftClient.getInstance();
+		return cameraMode && client.currentScreen == null && client.player != null;
+	}
+
+	/** 第一人称是否隐藏手持相机模型（安装动画期间仍显示）。 */
+	public static boolean isHandHidden() {
+		return isViewfinderActive() && installAnimTicks <= 0;
+	}
+
+	// ==================== 取景器 HUD ====================
+
+	private static final int[] ISO_STEPS = {
+			25, 50, 100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600
+	};
+	private static final int[] SHUTTER_STEPS = {
+			4000, 2000, 1000, 500, 250, 125, 60, 30, 15, 8, 4, 2, 1, -200, -400, -800
+	};
+
+	private static void tickHudInput(MinecraftClient client) {
+		if (!isViewfinderActive()) {
+			hudAdjustCooldown = 0;
+			hudParamCooldown = 0;
+			return;
+		}
+		ItemStack stack = client.player.getMainHandStack();
+		NbtCompound settings = Jishen.getSettings(stack);
+		hudMode = Math.max(0, Math.min(HudSnapshot.MODE_NAMES.length - 1, settings.getInt("hudMode")));
+
+		// 设计稿的键位：↑/↓ 切模式（沿用原变焦键）。
+		while (zoomInKey.wasPressed()) setHudMode(client, hudMode - 1);
+		while (zoomOutKey.wasPressed()) setHudMode(client, hudMode + 1);
+
+		int paramCount = Jishen.getLensSpec(stack).isZoom ? 6 : 5;
+		if (hudParam >= paramCount) hudParam = paramCount - 1;
+
+		long window = client.getWindow().getHandle();
+
+		// [ / ] 在参数之间移动（滚轮同样可以切换）。
+		if (hudParamCooldown > 0) {
+			hudParamCooldown--;
 		} else {
-			if (savedGuiScale != -1) {
-				if (client.options.getGuiScale().getValue() != savedGuiScale) {
-					client.options.getGuiScale().setValue(savedGuiScale);
-					client.onResolutionChanged();
-				}
-				savedGuiScale = -1;
+			boolean prev = InputUtil.isKeyPressed(window, GLFW.GLFW_KEY_LEFT_BRACKET);
+			boolean next = InputUtil.isKeyPressed(window, GLFW.GLFW_KEY_RIGHT_BRACKET);
+			if (prev != next) {
+				moveHudParam(next ? 1 : -1, paramCount);
+				hudParamCooldown = 5;
 			}
 		}
+
+		// ← / → 调整当前参数。
+		if (hudAdjustCooldown > 0) {
+			hudAdjustCooldown--;
+			return;
+		}
+		int dir = 0;
+		if (InputUtil.isKeyPressed(window, GLFW.GLFW_KEY_LEFT)) dir = -1;
+		else if (InputUtil.isKeyPressed(window, GLFW.GLFW_KEY_RIGHT)) dir = 1;
+		if (dir != 0) {
+			adjustHudParam(client, dir);
+			hudAdjustCooldown = 4;
+		}
 	}
+
+	private static void moveHudParam(int dir, int paramCount) {
+		hudParam = Math.floorMod(hudParam + dir, Math.max(1, paramCount));
+	}
+
+	private static void setHudMode(MinecraftClient client, int index) {
+		if (client.player == null) return;
+		index = Math.max(0, Math.min(HudSnapshot.MODE_NAMES.length - 1, index));
+		hudMode = index;
+
+		ItemStack stack = client.player.getMainHandStack();
+		NbtCompound settings = Jishen.getSettings(stack);
+		LensSpec lens = Jishen.getLensSpec(stack);
+		settings.putInt("hudMode", index);
+		switch (index) {
+			case 0 -> { // 自动：所有参数交给 AUTO
+				settings.putString("mode", "A_PLUS");
+				settings.putBoolean("evAuto", true);
+				settings.putBoolean("isoAuto", true);
+				settings.putBoolean("wbAuto", true);
+				settings.putBoolean("toneAuto", true);
+			}
+			case 1 -> { // 照片：标准程序曝光
+				settings.putString("mode", "P");
+				settings.putBoolean("evAuto", true);
+				settings.putBoolean("isoAuto", true);
+				settings.putBoolean("wbAuto", true);
+				settings.putBoolean("toneAuto", true);
+			}
+			case 2 -> { // 人像：最大光圈 + 自动对焦
+				settings.putString("mode", "AV");
+				settings.putFloat("aperture", lens.maxAperture);
+				settings.putBoolean("evAuto", true);
+				settings.putBoolean("isoAuto", true);
+				settings.putBoolean("focusAuto", true);
+			}
+			case 3 -> { // 夜景：低光长曝
+				settings.putString("mode", "TV");
+				settings.putInt("shutter", -200);
+				settings.putBoolean("evAuto", true);
+				settings.putBoolean("isoAuto", true);
+			}
+			case 4 -> { // 电影：1/48 快门
+				settings.putString("mode", "M");
+				settings.putInt("shutter", 48);
+				settings.putBoolean("evAuto", true);
+				settings.putBoolean("isoAuto", true);
+			}
+			default -> {
+			}
+		}
+		Jishen.setSettings(stack, settings);
+		client.player.sendMessage(Text.literal("[模式] " + HudSnapshot.MODE_NAMES[index]), true);
+	}
+
+	private static void adjustHudParam(MinecraftClient client, int dir) {
+		if (client.player == null) return;
+		ItemStack stack = client.player.getMainHandStack();
+		NbtCompound settings = Jishen.getSettings(stack);
+		LensSpec lens = Jishen.getLensSpec(stack);
+
+		switch (hudParam) {
+			case 0 -> { // 曝光补偿（1/3 EV）
+				int step = settings.getInt("evCompStep") + dir;
+				step = Math.max(-9, Math.min(9, step));
+				settings.putInt("evCompStep", step);
+				settings.putBoolean("evAuto", false);
+			}
+			case 1 -> { // ISO
+				int idx = nearestIndex(ISO_STEPS, settings.getInt("iso"));
+				idx = Math.max(0, Math.min(ISO_STEPS.length - 1, idx + dir));
+				settings.putInt("iso", ISO_STEPS[idx]);
+				settings.putBoolean("isoAuto", false);
+			}
+			case 2 -> { // 快门
+				int idx = nearestIndex(SHUTTER_STEPS, settings.getInt("shutter"));
+				idx = Math.max(0, Math.min(SHUTTER_STEPS.length - 1, idx + dir));
+				settings.putInt("shutter", SHUTTER_STEPS[idx]);
+			}
+			case 3 -> { // 白平衡
+				int wb = Math.max(2000, Math.min(12000, settings.getInt("wb") + dir * 100));
+				settings.putInt("wb", wb);
+				settings.putBoolean("wbAuto", false);
+			}
+			case 4 -> { // 对焦距离
+				float focus = Math.max(0.5f, Math.min(64f, settings.getFloat("focus") + dir * 0.5f));
+				settings.putFloat("focus", focus);
+			}
+			case 5 -> { // 焦距（仅变焦镜头）
+				adjustZoom(dir);
+			}
+			default -> {
+			}
+		}
+		Jishen.setSettings(stack, settings);
+	}
+
+	private static int nearestIndex(int[] values, int value) {
+		int best = 0;
+		for (int i = 1; i < values.length; i++) {
+			if (Math.abs(values[i] - value) < Math.abs(values[best] - value)) best = i;
+		}
+		return best;
+	}
+
+	private static void fillHudSnapshot(MinecraftClient client) {
+		ItemStack stack = client.player.getMainHandStack();
+		NbtCompound settings = Jishen.getSettings(stack);
+		LensSpec lens = Jishen.getLensSpec(stack);
+
+		boolean zoomLens = lens.isZoom;
+		int paramCount = zoomLens ? 6 : 5;
+		if (hudParam >= paramCount) hudParam = paramCount - 1;
+		hudMode = Math.max(0, Math.min(HudSnapshot.MODE_NAMES.length - 1, settings.getInt("hudMode")));
+
+		boolean isoAuto = settings.getBoolean("isoAuto");
+		boolean wbAuto = settings.getBoolean("wbAuto");
+		boolean focusAuto = settings.getBoolean("focusAuto");
+
+		HUD.modeIndex = hudMode;
+		HUD.paramIndex = hudParam;
+		HUD.paramCount = paramCount;
+		HUD.autoMode = hudMode == 0;
+		HUD.portrait = hudMode == 2;
+		HUD.night = hudMode == 3;
+		HUD.cinemaBars = hudMode == 4;
+		HUD.liveLabel = (Jishen.isFullFrame(stack) ? "全画幅" : "半画幅") + " · 8K";
+
+		String evStr = evAuto ? "AUTO"
+				: ((evComp >= 0 ? "+" : "") + String.format(Locale.US, "%.1f", evComp) + "EV");
+		HUD.readout = String.format(Locale.US, "ƒ%.1f · %s · ISO%d · %s",
+				cachedAperture, Metering.formatShutter(cachedShutter), cachedIso, evStr);
+
+		for (int i = 0; i < HudSnapshot.PARAM_NAMES.length; i++) {
+			HUD.paramValues[i] = null;
+			HUD.paramFill[i] = 0f;
+		}
+
+		HUD.paramValues[0] = evAuto ? "AUTO" : ((evComp >= 0 ? "+" : "") + String.format(Locale.US, "%.1f", evComp) + "EV");
+		HUD.paramFill[0] = clamp01((totalEvOffset + 3f) / 6f);
+
+		HUD.paramValues[1] = isoAuto ? "AUTO" : String.valueOf(cachedIso);
+		HUD.paramFill[1] = clamp01((float) (Math.log((double) cachedIso / ISO_STEPS[0]) / Math.log((double) ISO_STEPS[ISO_STEPS.length - 1] / ISO_STEPS[0])));
+
+		HUD.paramValues[2] = Metering.formatShutter(cachedShutter);
+		HUD.paramFill[2] = (float) nearestIndex(SHUTTER_STEPS, cachedShutter) / (SHUTTER_STEPS.length - 1);
+
+		HUD.paramValues[3] = wbAuto ? "AUTO" : cachedWb + "K";
+		HUD.paramFill[3] = clamp01((cachedWb - 2000f) / 10000f);
+
+		float focus = settings.getFloat("focus");
+		HUD.paramValues[4] = focusAuto ? "AUTO" : String.format(Locale.US, "%.1fm", focus);
+		HUD.paramFill[4] = clamp01((float) (Math.log(Math.max(0.5f, focus)) / Math.log(64.0)));
+
+		if (zoomLens) {
+			HUD.paramValues[5] = lens.focalLength + "mm";
+			float span = Math.max(1f, lens.maxFocalLength - lens.baseFocalLength);
+			HUD.paramFill[5] = clamp01((lens.focalLength - lens.baseFocalLength) / span);
+		}
+	}
+
+	private static float clamp01(float v) {
+		return v < 0f ? 0f : (v > 1f ? 1f : v);
+	}
+
 
 	private static void tickMetering(MinecraftClient client) {
 		if (!cameraMode || client.player == null) return;
@@ -362,6 +617,7 @@ public class CameraModClient implements ClientModInitializer {
 		boolean isoAuto = settings.getBoolean("isoAuto");
 		boolean wbAuto = settings.getBoolean("wbAuto");
 		boolean toneAuto = settings.getBoolean("toneAuto");
+		evAuto = Jishen.isEvAuto(settings);
 
 		ExposureMode mode = ExposureMode.M;
 		String modeStr = settings.getString("mode");
@@ -369,7 +625,7 @@ public class CameraModClient implements ClientModInitializer {
 			if (m.name.equals(modeStr)) { mode = m; break; }
 		}
 
-		LensSpec lens = Jingtou.getSpec(client.player.getOffHandStack());
+		LensSpec lens = Jishen.getLensSpec(bodyStack);
 		int focal = lens.focalLength;
 		double rawSceneEV = Metering.getSceneEV();
 
@@ -389,18 +645,20 @@ public class CameraModClient implements ClientModInitializer {
 		PostProcess.updateWhiteBalance(wb, sceneTemp);
 
 		int isoIn = isoAuto ? -1 : iso;
+		boolean fullFrame = Jishen.isFullFrame(bodyStack);
 
 		if (mode == ExposureMode.A_PLUS) {
-			AutoExposure.AutoResult r = AutoExposure.computeFullAuto(autoEV, focal, lens.maxAperture, 8, isoIn);
+			// AUTO：4 秒上限，优先压低 ISO（看得见的噪点比看不见的机震更伤画面）。
+			AutoExposure.AutoResult r = AutoExposure.computeFullAuto(autoEV, focal, lens.maxAperture, -400, isoIn, fullFrame);
 			iso = r.iso; sh = r.shutter; ap = Math.max(r.aperture, lens.maxAperture);
 		} else if (mode == ExposureMode.P) {
-			AutoExposure.AutoResult r = AutoExposure.computeFullAuto(autoEV, focal, lens.maxAperture, -3000, isoIn);
+			AutoExposure.AutoResult r = AutoExposure.computeFullAuto(autoEV, focal, lens.maxAperture, -200, isoIn, fullFrame);
 			iso = r.iso; sh = r.shutter; ap = Math.max(r.aperture, lens.maxAperture);
 		} else if (mode == ExposureMode.AV) {
-			AutoExposure.AutoResult r = AutoExposure.computeAv(autoEV, ap, focal, -3000, isoIn);
+			AutoExposure.AutoResult r = AutoExposure.computeAv(autoEV, ap, focal, -400, isoIn, fullFrame);
 			iso = r.iso; sh = r.shutter;
 		} else if (mode == ExposureMode.TV) {
-			AutoExposure.AutoResult r = AutoExposure.computeTv(autoEV, sh, lens.maxAperture, isoIn);
+			AutoExposure.AutoResult r = AutoExposure.computeTv(autoEV, sh, lens.maxAperture, isoIn, fullFrame);
 			iso = r.iso; ap = Math.max(r.aperture, lens.maxAperture);
 		} else {
 			if (isoAuto) iso = AutoExposure.computeManualIso(autoEV, ap, sh);
@@ -412,15 +670,14 @@ public class CameraModClient implements ClientModInitializer {
 		if (toneAuto) tone = 0;
 
 		PostProcess.updateIso(iso);
-		evComp = evStep / 3.0f;
 
 		double diff = Metering.exposureDiff(ap, sh, iso);
 		lastDiff = diff;
 
-		String evStr = (evComp >= 0 ? "+" : "") + String.format(Locale.US, "%.1f", evComp);
-		hudLine1 = String.format(Locale.US, "%s %s  %dmm  f/%.1f  %s  ISO%d  %dK  %sEV",
-				mode.name, Metering.currentMode.displayName, focal, ap, Metering.formatShutter(sh), iso, wb, evStr);
-		hudLine2 = String.format(Locale.US, "场景EV:%.1f  场景色温:%dK", sceneEV, sceneTemp);
+		// Auto EV cancels the metering error entirely: the photo is exposed for
+		// the scene. Manual EV is the user's own offset and is left untouched.
+		evComp = evAuto ? (float) diff : evStep / 3.0f;
+		totalEvOffset = (float) (-diff + evComp);
 	}
 
 	private static void cycleMeteringMode(MinecraftClient client) {
@@ -432,8 +689,8 @@ public class CameraModClient implements ClientModInitializer {
 	private static void adjustZoom(int dir) {
 		MinecraftClient client = MinecraftClient.getInstance();
 		if (!cameraMode || client.player == null) return;
-		ItemStack lensStack = client.player.getOffHandStack();
-		LensSpec spec = Jingtou.getSpec(lensStack);
+		ItemStack camera = client.player.getMainHandStack();
+		LensSpec spec = Jishen.getLensSpec(camera);
 		if (!spec.isZoom) return;
 
 		int step = Math.max(1, (int) ((spec.maxFocalLength - spec.baseFocalLength) * 0.1f));
@@ -442,7 +699,7 @@ public class CameraModClient implements ClientModInitializer {
 		if (newFocal > spec.maxFocalLength) newFocal = spec.maxFocalLength;
 		if (newFocal != spec.focalLength) {
 			spec.focalLength = newFocal;
-			Jingtou.setSpec(lensStack, spec);
+			Jishen.setLensSpec(camera, spec);
 		}
 	}
 
@@ -480,7 +737,11 @@ public class CameraModClient implements ClientModInitializer {
 	}
 
 	private static void drawSingleBar(DrawContext ctx, MinecraftClient client, int x, int y, int width, double activeEV) {
-		int color = 0xFFAACC77;
+		// A manual EV that pushes the exposure more than one stop away from the
+		// metered value will visibly clip; warn with red numbers instead of
+		// silently ruining the shot.
+		boolean warn = !evAuto && Math.abs(totalEvOffset) > 1.0f;
+		int color = warn ? 0xFFFF5555 : 0xFFAACC77;
 		int textScale = 3;
 		int pixelPerEv = 45;
 		int tickWidth = 2;

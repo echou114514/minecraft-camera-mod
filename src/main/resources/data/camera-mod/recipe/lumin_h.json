@@ -8,9 +8,9 @@
   "key": {
     "B": { "item": "minecraft:stone_button" },
     "I": { "item": "minecraft:iron_block" },
-    "C": { "tag": "camera-mod:cmos" },
+    "C": { "item": "camera-mod:half_frame_cmos" },
     "G": { "item": "minecraft:glass" },
     "R": { "item": "minecraft:redstone_block" }
   },
-  "result": { "id": "camera-mod:camera_body", "count": 1 }
+  "result": { "id": "camera-mod:lumin_h", "count": 1 }
 }

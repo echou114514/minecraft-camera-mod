@@ -1,21 +1,36 @@
 package com.example.camera.client.mixin;
 
-import com.example.camera.client.HighResCapture;
+import com.example.camera.client.CameraModClient;
 
 import net.minecraft.client.gui.hud.InGameHud;
-import net.minecraft.client.gui.DrawContext;
-import net.minecraft.client.render.RenderTickCounter;
+
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
+/**
+ * Removes the vanilla hotbar / health / hunger / crosshair while the camera
+ * viewfinder is up, so the new borderless HUD is the only thing on screen.
+ *
+ * <p>We must not cancel {@code InGameHud.render} itself: Fabric's
+ * {@code HudRenderCallback} is invoked at its TAIL, which is where the camera
+ * HUD is drawn.</p>
+ */
 @Mixin(InGameHud.class)
 public class InGameHudMixin {
 
-    @Inject(method = "render", at = @At("HEAD"))
-    private void cameraMod$hudStart(DrawContext ctx, RenderTickCounter tickCounter, CallbackInfo ci) {
-        // HUD 开始渲染 → 切回主 framebuffer
-        HighResCapture.setInWorldRender(false);
+    @Inject(method = "renderMainHud", at = @At("HEAD"), cancellable = true)
+    private void cameraMod$hideMainHud(CallbackInfo ci) {
+        if (CameraModClient.isViewfinderActive()) {
+            ci.cancel();
+        }
+    }
+
+    @Inject(method = "renderCrosshair", at = @At("HEAD"), cancellable = true)
+    private void cameraMod$hideCrosshair(CallbackInfo ci) {
+        if (CameraModClient.isViewfinderActive()) {
+            ci.cancel();
+        }
     }
 }

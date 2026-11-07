@@ -1,12 +1,10 @@
 package com.example.camera.client.gui;
 
-import com.example.camera.ModItems;
 import com.example.camera.client.AutoExposure;
 import com.example.camera.client.ExposureMode;
 import com.example.camera.client.metering.Metering;
 import data.LensSpec;
 import item.Jishen;
-import item.Jingtou;
 
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
@@ -47,15 +45,15 @@ public class CameraSettingsScreen extends Screen {
     private float focus, aperture;
     private float minAperture = 0.95f;
     private boolean isoAuto, shutterAuto, apertureAuto, wbAuto, toneAuto, focusAuto;
+    private boolean evAuto = true;
 
     private int selected = R_ISO;
 
     // 根据焦距计算最近对焦距离 (焦距越长，最近对焦距离越远)
     private float getMinFocusDistance() {
         int focal = 50; // 默认值
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.player != null && client.player.getOffHandStack().isOf(ModItems.LENS)) {
-            LensSpec spec = Jingtou.getSpec(client.player.getOffHandStack());
+        if (target != null) {
+            LensSpec spec = Jishen.getLensSpec(target);
             focal = spec.focalLength;
         }
         return Math.max(0.5f, focal / 100.0f);
@@ -84,6 +82,7 @@ public class CameraSettingsScreen extends Screen {
         aperture = nbt.getFloat("aperture");
         evCompStep = nbt.getInt("evCompStep");
         autoEvStep = nbt.getInt("autoEvStep");
+        evAuto = Jishen.isEvAuto(nbt);
 
         isoAuto = nbt.getBoolean("isoAuto");
         shutterAuto = nbt.getBoolean("shutterAuto");
@@ -92,11 +91,8 @@ public class CameraSettingsScreen extends Screen {
         toneAuto = nbt.getBoolean("toneAuto");
         focusAuto = nbt.getBoolean("focusAuto");
 
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.player != null && client.player.getOffHandStack().isOf(ModItems.LENS)) {
-            LensSpec spec = Jingtou.getSpec(client.player.getOffHandStack());
-            minAperture = spec.maxAperture;
-        }
+        LensSpec spec = Jishen.getLensSpec(stack);
+        minAperture = spec.maxAperture;
         if (aperture < minAperture) aperture = minAperture;
 
         applyModeRules();
@@ -123,6 +119,7 @@ public class CameraSettingsScreen extends Screen {
         nbt.putFloat("focus", focus);
         nbt.putInt("evCompStep", evCompStep);
         nbt.putInt("autoEvStep", autoEvStep);
+        nbt.putBoolean("evAuto", evAuto);
         nbt.putBoolean("isoAuto", isoAuto);
         nbt.putBoolean("shutterAuto", shutterAuto);
         nbt.putBoolean("apertureAuto", apertureAuto);
@@ -154,7 +151,7 @@ public class CameraSettingsScreen extends Screen {
         drawHLine(ctx, innerX, curY, innerX + innerW);
         curY += 8;
 
-        drawEvBar(ctx, innerX, curY, innerW, 42, evCompStep, R_EV);
+        drawEvBar(ctx, innerX, curY, innerW, 42, evCompStep, R_EV, evAuto);
         curY += 42;
         drawHLine(ctx, innerX, curY, innerX + innerW);
         curY += 8;
@@ -230,7 +227,7 @@ public class CameraSettingsScreen extends Screen {
     }
 
     private void drawEvBar(DrawContext ctx, int x, int y, int w, int h,
-                           int step, int index) {
+                           int step, int index, boolean auto) {
         boolean sel = (selected == index);
         int color = sel ? COLOR_SEL : COLOR;
 
@@ -260,6 +257,10 @@ public class CameraSettingsScreen extends Screen {
             int tx = cx + i * spacing / 3;
             ctx.fill(tx, tickY, tx + 1, tickY + 4, color);
         }
+
+        String evAutoMark = auto ? "A" : "M";
+        ctx.drawText(textRenderer, evAutoMark, sx + sw - 8, sy,
+                auto ? 0xFF55FF55 : 0xFFAAAAAA, false);
         m.pop();
 
         double ev = step / 3.0;
@@ -303,6 +304,7 @@ public class CameraSettingsScreen extends Screen {
             case R_SHUTTER -> mode.shutterSwitchable();
             case R_APERTURE -> mode.apertureSwitchable();
             case R_WB, R_TONE -> mode.wbSwitchable();
+            case R_EV -> true;
             default -> false;
         };
     }
@@ -346,6 +348,7 @@ public class CameraSettingsScreen extends Screen {
             case R_WB -> wbAuto = !wbAuto;
             case R_TONE -> toneAuto = !toneAuto;
             case R_SHUTTER -> shutterAuto = !shutterAuto;
+            case R_EV -> evAuto = !evAuto;
         }
     }
 
@@ -364,6 +367,7 @@ public class CameraSettingsScreen extends Screen {
                 iso = stepArrayInt(AutoExposure.ISO_STOPS, iso, dir);
             }
             case R_EV -> {
+                evAuto = false;
                 evCompStep += dir;
                 if (evCompStep > 15) evCompStep = 15;
                 if (evCompStep < -15) evCompStep = -15;

@@ -32,180 +32,96 @@ public class AutoExposure {
     }
 
     public static AutoResult computeFullAuto(double sceneEV, int focalLength,
-                                             float maxAperture, int slowestShutter, int manualIso) {
-        AutoResult r = new AutoResult();
-
-        float N = maxAperture;
-        double N2 = N * N;
-
-        int safeVal = Math.max(1, focalLength);
-        double tSafe  = 1.0 / safeVal;
-        double t2Safe = 1.0 / (safeVal * 2.0);
-        double t3Safe = 1.0 / (safeVal * 3.0);
-        double tSlow  = Metering.shutterToSeconds(slowestShutter);
-
-        boolean isoAuto = (manualIso < 0);
-        int isoLow  = isoAuto ? 100   : manualIso;
-        int isoMid1 = isoAuto ? 3200  : isoLow;
-        int isoMid2 = isoAuto ? 12800 : isoLow;
-        int isoHigh = isoAuto ? 25600 : isoLow;
-
-        double logLow  = log2(isoLow  / 100.0);
-        double logMid1 = log2(isoMid1 / 100.0);
-        double logMid2 = log2(isoMid2 / 100.0);
-        double logHigh = log2(isoHigh / 100.0);
-
-        double EV_A = log2(64.0 / (1.0 / 4000.0)) - logLow;   // F8, 1/4000
-        double EV_B = log2(64.0 / t3Safe) - logLow;           // F8, 3×safe
-        double EV_C = log2(N2 / t3Safe) - logLow;             // maxAp, 3×safe
-        double EV_D = log2(N2 / t2Safe) - logLow;             // maxAp, 2×safe
-        double EV_E = log2(N2 / t2Safe) - logMid1;            // maxAp, 2×safe, ISO3200
-        double EV_F = log2(N2 / tSafe) - logMid1;             // maxAp, safe, ISO3200
-        double EV_G = log2(N2 / tSafe) - logMid2;             // maxAp, safe, ISO12800
-        double EV_H = log2(N2 / tSlow) - logMid2;             // maxAp, slow, ISO12800
-        double EV_I = log2(N2 / tSlow) - logHigh;             // maxAp, slow, ISO25600
-
-        if (sceneEV >= EV_A) {
-            r.iso = isoLow; r.shutter = 4000; r.aperture = 8f;
-        } else if (sceneEV >= EV_B) {
-            double t = 64.0 / Math.pow(2, sceneEV + logLow);
-            r.iso = isoLow; r.aperture = 8f;
-            r.shutter = snapShutterFromSeconds(t);
-        } else if (sceneEV >= EV_C) {
-            double Nreq = Math.sqrt(Math.pow(2, sceneEV + logLow) * t3Safe);
-            float ap = snapApertureValue((float) Nreq);
-            r.iso = isoLow;
-            r.shutter = snapShutterFromSeconds(t3Safe);
-            r.aperture = Math.max(ap, N);
-        } else if (sceneEV >= EV_D) {
-            double t = N2 / Math.pow(2, sceneEV + logLow);
-            r.iso = isoLow; r.aperture = N;
-            r.shutter = snapShutterFromSeconds(t);
-        } else if (sceneEV >= EV_E) {
-            double isoLog = log2(N2 / t2Safe) - sceneEV;
-            double isoIdeal = 100.0 * Math.pow(2, isoLog);
-            r.iso = Math.min(isoMid1, snapISO((int) Math.round(isoIdeal)));
-            r.shutter = snapShutterFromSeconds(t2Safe);
-            r.aperture = N;
-        } else if (sceneEV >= EV_F) {
-            double t = N2 / Math.pow(2, sceneEV + logMid1);
-            r.iso = isoMid1; r.aperture = N;
-            r.shutter = snapShutterFromSeconds(t);
-        } else if (sceneEV >= EV_G) {
-            double isoLog = log2(N2 / tSafe) - sceneEV;
-            double isoIdeal = 100.0 * Math.pow(2, isoLog);
-            r.iso = Math.min(isoMid2, snapISO((int) Math.round(isoIdeal)));
-            r.shutter = snapShutterFromSeconds(tSafe);
-            r.aperture = N;
-        } else if (sceneEV >= EV_H) {
-            double t = N2 / Math.pow(2, sceneEV + logMid2);
-            r.iso = isoMid2; r.aperture = N;
-            r.shutter = snapShutterFromSeconds(t);
-        } else if (sceneEV >= EV_I) {
-            double isoLog = log2(N2 / tSlow) - sceneEV;
-            double isoIdeal = 100.0 * Math.pow(2, isoLog);
-            r.iso = Math.min(isoHigh, snapISO((int) Math.round(isoIdeal)));
-            r.shutter = slowestShutter;
-            r.aperture = N;
-        } else {
-            r.iso = isoHigh; r.shutter = slowestShutter; r.aperture = N;
-        }
-
-        return r;
+                                             float maxAperture, int slowestShutter,
+                                             int manualIso, boolean fullFrame) {
+        return solve(sceneEV, focalLength, maxAperture, slowestShutter,
+                manualIso, fullFrame, 0f, Integer.MIN_VALUE);
     }
 
     public static AutoResult computeAv(double sceneEV, float manualAp, int focalLength,
-                                       int slowestShutter, int manualIso) {
-        AutoResult r = new AutoResult();
-        r.aperture = manualAp;
-
-        double N2 = manualAp * manualAp;
-        int safeVal = Math.max(1, focalLength);
-        double t2Safe = 1.0 / (safeVal * 2.0);
-        double tSafe = 1.0 / safeVal;
-        double tSlow = Metering.shutterToSeconds(slowestShutter);
-
-        boolean isoAuto = (manualIso < 0);
-        int isoLow  = isoAuto ? 100   : manualIso;
-        int isoMid1 = isoAuto ? 3200  : isoLow;
-        int isoMid2 = isoAuto ? 12800 : isoLow;
-        int isoHigh = isoAuto ? 25600 : isoLow;
-
-        double logLow  = log2(isoLow  / 100.0);
-        double logMid1 = log2(isoMid1 / 100.0);
-        double logMid2 = log2(isoMid2 / 100.0);
-        double logHigh = log2(isoHigh / 100.0);
-
-        double EV_D = log2(N2 / t2Safe) - logLow;
-        double EV_E = log2(N2 / t2Safe) - logMid1;
-        double EV_F = log2(N2 / tSafe) - logMid1;
-        double EV_G = log2(N2 / tSafe) - logMid2;
-        double EV_H = log2(N2 / tSlow) - logMid2;
-        double EV_I = log2(N2 / tSlow) - logHigh;
-
-        if (sceneEV >= EV_D) {
-            double t = N2 / Math.pow(2, sceneEV + logLow);
-            r.iso = isoLow;
-            r.shutter = snapShutterFromSeconds(t);
-        } else if (sceneEV >= EV_E) {
-            double isoLog = log2(N2 / t2Safe) - sceneEV;
-            double isoIdeal = 100.0 * Math.pow(2, isoLog);
-            r.iso = Math.min(isoMid1, snapISO((int) Math.round(isoIdeal)));
-            r.shutter = snapShutterFromSeconds(t2Safe);
-        } else if (sceneEV >= EV_F) {
-            double t = N2 / Math.pow(2, sceneEV + logMid1);
-            r.iso = isoMid1;
-            r.shutter = snapShutterFromSeconds(t);
-        } else if (sceneEV >= EV_G) {
-            double isoLog = log2(N2 / tSafe) - sceneEV;
-            double isoIdeal = 100.0 * Math.pow(2, isoLog);
-            r.iso = Math.min(isoMid2, snapISO((int) Math.round(isoIdeal)));
-            r.shutter = snapShutterFromSeconds(tSafe);
-        } else if (sceneEV >= EV_H) {
-            double t = N2 / Math.pow(2, sceneEV + logMid2);
-            r.iso = isoMid2;
-            r.shutter = snapShutterFromSeconds(t);
-        } else if (sceneEV >= EV_I) {
-            double isoLog = log2(N2 / tSlow) - sceneEV;
-            double isoIdeal = 100.0 * Math.pow(2, isoLog);
-            r.iso = Math.min(isoHigh, snapISO((int) Math.round(isoIdeal)));
-            r.shutter = slowestShutter;
-        } else {
-            r.iso = isoHigh; r.shutter = slowestShutter;
-        }
-
-        return r;
+                                       int slowestShutter, int manualIso, boolean fullFrame) {
+        return solve(sceneEV, focalLength, manualAp, slowestShutter,
+                manualIso, fullFrame, manualAp, Integer.MIN_VALUE);
     }
 
     public static AutoResult computeTv(double sceneEV, int manualShutter,
-                                       float maxAperture, int manualIso) {
-        AutoResult r = new AutoResult();
-        r.shutter = manualShutter;
+                                       float maxAperture, int manualIso, boolean fullFrame) {
+        return solve(sceneEV, 50, maxAperture, manualShutter,
+                manualIso, fullFrame, 0f, manualShutter);
+    }
 
-        boolean isoAuto = (manualIso < 0);
-        int isoLow = isoAuto ? 100 : manualIso;
+    /**
+     * Snapmatica 式自动曝光预算：在「ISO / 光圈 / 快门」三根轴里搜一个分数最低的
+     * 组合，而不是按固定阈值分段硬编码。
+     *
+     * <p>目标：曝光误差优先；其次压低 ISO（噪点）；再其次优先用较慢的快门（游戏里
+     * 没有机震，长曝比高感干净）；光圈尽量落在 f/4 附近（镜头最锐）。</p>
+     *
+     * @param fixedAperture  &gt; 0 时锁定光圈（Av 模式）
+     * @param fixedShutter   {@link Integer#MIN_VALUE} 以外时锁定快门（Tv 模式）
+     */
+    private static AutoResult solve(double sceneEV, int focalLength, float maxAperture,
+                                    int slowestShutter, int manualIso, boolean fullFrame,
+                                    float fixedAperture, int fixedShutter) {
+        AutoResult best = new AutoResult();
+        double bestScore = Double.MAX_VALUE;
 
-        double t = Metering.shutterToSeconds(manualShutter);
-        double N = Math.sqrt(Math.pow(2, sceneEV + log2(isoLow / 100.0)) * t);
-        float snapped = snapApertureValue((float) N);
+        double minShutterSec = 1.0 / 4000.0;
+        double maxShutterSec = Math.max(minShutterSec, Metering.shutterToSeconds(slowestShutter));
+        double preferredSec = 1.0 / Math.max(8.0, focalLength * 2.0);
+        double isoCap = fullFrame ? 6400.0 : 3200.0;
 
-        r.iso = isoLow;
+        int[] isoList = manualIso > 0 ? new int[] { manualIso } : ISO_STOPS;
+        float fixedAp = fixedAperture > 0f ? snapApertureValue(fixedAperture) : 0f;
 
-        if (snapped < maxAperture) {
-            r.aperture = maxAperture;
-            if (isoAuto) {
-                double evAtBase = log2(maxAperture * maxAperture / t);
-                double isoLog = evAtBase - sceneEV;
-                double isoIdeal = 100.0 * Math.pow(2, isoLog);
-                r.iso = Math.min(25600, snapISO((int) Math.round(isoIdeal)));
+        for (int iso : isoList) {
+            if (manualIso <= 0 && iso > isoCap) {
+                continue;
             }
-        } else if (snapped > 22f) {
-            r.aperture = 22f;
-        } else {
-            r.aperture = snapped;
+            double logIso = log2(iso / 100.0);
+
+            for (float n : APERTURE_STOPS) {
+                if (n < maxAperture - 1e-4f) {
+                    continue;
+                }
+                if (fixedAp > 0f && Math.abs(n - fixedAp) > 1e-4f) {
+                    continue;
+                }
+                for (int shutter : SHUTTER_STOPS) {
+                    if (fixedShutter != Integer.MIN_VALUE && shutter != fixedShutter) {
+                        continue;
+                    }
+                    double t = Metering.shutterToSeconds(shutter);
+                    if (t < minShutterSec - 1e-9 || t > maxShutterSec + 1e-9) {
+                        continue;
+                    }
+
+                    double ev = log2(n * n / t) - logIso;
+                    double err = Math.abs(ev - sceneEV);
+
+                    double score = err * 60.0;                       // 曝光准确度最重要
+                    score += logIso * 0.85;                          // 尽量低 ISO
+                    if (t > preferredSec) {
+                        score += log2(t / preferredSec) * 0.08;      // 慢快门几乎不扣分
+                    }
+                    score += Math.abs(log2(n / 4.0)) * 0.16;         // 偏好 f/4
+
+                    if (score < bestScore) {
+                        bestScore = score;
+                        best.iso = iso;
+                        best.aperture = n;
+                        best.shutter = shutter;
+                    }
+                }
+            }
         }
 
-        return r;
+        if (bestScore == Double.MAX_VALUE) {
+            best.iso = manualIso > 0 ? manualIso : 100;
+            best.aperture = maxAperture;
+            best.shutter = slowestShutter;
+        }
+        return best;
     }
 
     public static int computeManualIso(double sceneEV, float aperture, int shutter) {

@@ -1,86 +1,169 @@
 plugins {
-	id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
-	id 'maven-publish'
+    // 使用官方插件，确保 loom_version 在 gradle.properties 中定义且 >= 0.10
+    id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
+    id 'maven-publish'
 }
 
 repositories {
+    // Fallback for the dev-client mods when dev-mods/ has no local copy.
+    // Loom 会自动添加其余的 Maven 仓库。
+    maven { url = "https://api.modrinth.com/maven" }
+    maven {
+        name = "GeckoLib"
+        url = "https://dl.cloudsmith.io/public/geckolib3/geckolib/maven/"
+        content {
+            includeGroup("software.bernie.geckolib")
+        }
+    }
 }
 
-loom {
-	splitEnvironmentSourceSets()
+def devModsCache = file("dev-mods")
 
-	mods {
-		"camera-mod" {
-			sourceSet sourceSets.main
-			sourceSet sourceSets.client
-		}
-	}
+loom {
+    splitEnvironmentSourceSets()
+
+    mods {
+        "camera-mod" {
+            sourceSet sourceSets.main
+            sourceSet sourceSets.client
+        }
+    }
 }
 
 dependencies {
-	minecraft "com.mojang:minecraft:${project.minecraft_version}"
-	mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
-	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
 
-	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+    // 3D camera model + first-person assembly/shutter animations.
+    modImplementation "software.bernie.geckolib:geckolib-fabric-${project.minecraft_version}:${project.geckolib_version}"
 
+    // Test-only runtime mods for `gradlew runClient`; they never reach the
+    // published jar.
+    //
+    // OFF by default: Iris' refmap is keyed by Mojang names while this project
+    // maps with yarn, so Loom's dev remapper NPEs on Iris' descriptor-less
+    // @ModifyArg annotations (see TODO.md). Enable with `-PwithIrisDev` only
+    // when actively debugging the shader integration; otherwise validate
+    // shaders in a real modpack via scripts/runModpack.sh.
+    //
+    // Loom has to remap these jars (including Iris' mixin refmap), so they
+    // cannot simply be dropped into run/mods. A local copy in dev-mods/ avoids
+    // the slow Modrinth download.
+    if (providers.gradleProperty("withIrisDev").orNull == "true") {
+        [
+            ["iris-fabric-1.8.14-beta.1+mc1.21.1.jar",
+             "maven.modrinth:iris:1.8.14-beta.1+1.21.1-fabric"],
+            ["sodium-fabric-0.8.13-beta.1+mc1.21.1.jar",
+             "maven.modrinth:sodium:mc1.21.1-0.8.13-beta.1-fabric"],
+            ["DistantHorizons-3.3.3-1.21.1-fabric-neoforge.jar",
+             "maven.modrinth:distanthorizons:3.3.3-1.21.1"],
+        ].each { name, coordinate ->
+            def cached = new File(devModsCache, name)
+            if (cached.exists()) {
+                modRuntimeOnly files(cached)
+            } else {
+                modRuntimeOnly coordinate
+            }
+        }
+    }
 }
 
 processResources {
-	def version = project.version
-	inputs.property "version", version
+    def version = project.version
+    inputs.property "version", version
 
-	filesMatching("fabric.mod.json") {
-		expand "version": version
-	}
+    filesMatching("fabric.mod.json") {
+        expand "version": version
+    }
 }
 
 tasks.withType(JavaCompile).configureEach {
-	it.options.release = 21
+    it.options.release = 21
 }
 
 java {
-	// Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
-	// if it is present.
-	// If you remove this line, sources will not be generated.
-	withSourcesJar()
-
-	sourceCompatibility = JavaVersion.VERSION_21
-	targetCompatibility = JavaVersion.VERSION_21
+    withSourcesJar()
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
 }
 
 jar {
-	def projectName = project.name
-	inputs.property "projectName", projectName
+    def projectName = project.name
+    inputs.property "projectName", projectName
 
-	from("LICENSE") {
-		rename { "${it}_$projectName"}
-	}
+    from("LICENSE") {
+        rename { "${it}_$projectName" }
+    }
 }
 
-// configure the maven publication
 publishing {
-	publications {
-		create("mavenJava", MavenPublication) {
-			from components.java
-		}
-	}
-
-	// See https://docs.gradle.org/current/userguide/publishing_maven.html for information on how to set up publishing.
-	repositories {
-		// Add repositories to publish to here.
-		// Notice: This block does NOT have the same function as the block in the top level.
-		// The repositories here will be used for publishing your artifact, not for
-		// retrieving dependencies.
-	}
+    publications {
+        create("mavenJava", MavenPublication) {
+            from components.java
+        }
+    }
+    repositories {
+        // 发布仓库配置（如有需要）
+    }
 }
 
 loom {
-	runs {
-		client {
-			programArgs "--username", "Dev"
-			vmArg "-Xmx6G"
-			vmArg "-Xms6G"
-		}
-	}
+    runs {
+        client {
+            programArgs "--username", "Dev"
+            vmArg "-Xmx6G"
+            vmArg "-Xms6G"
+            // Complementary Reimagined keeps the linear HDR scene in colortex0;
+            // Eclipse uses colortex5 (the compiled default).
+            vmArg "-Dcameramod.irisHdrTarget=0"
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dev-client test environment. The runtime mods are declared in `dependencies`
+// (Loom has to remap them); this task only stages the shader pack and seeds
+// Iris so `runClient` starts directly with the right pack.
+// `run/` and `dev-mods/` are gitignored.
+// ---------------------------------------------------------------------------
+def devShaderpackName = "ComplementaryReimagined_r5.9.3.zip"
+def devShaderpackUrl = "https://cdn.modrinth.com/data/HVnmMxH1/versions/Bqen1mJX/ComplementaryReimagined_r5.9.3.zip"
+
+tasks.register("prepareDevRun") {
+    description = "Stages the test shader pack and preselects it for `runClient`."
+    outputs.file(file("run/shaderpacks/${devShaderpackName}"))
+    outputs.file(file("run/config/iris.properties"))
+
+    doLast {
+        def pack = file("run/shaderpacks/${devShaderpackName}")
+        if (!pack.exists()) {
+            pack.parentFile.mkdirs()
+            def cached = new File(devModsCache, devShaderpackName)
+            if (cached.exists()) {
+                logger.lifecycle("Using cached ${devShaderpackName}")
+                java.nio.file.Files.copy(cached.toPath(), pack.toPath())
+            } else {
+                logger.lifecycle("Downloading ${devShaderpackName} ...")
+                URI.create(devShaderpackUrl).toURL().withInputStream { input ->
+                    pack.withOutputStream { output -> output << input }
+                }
+            }
+        }
+
+        // Only seed the config on first run so in-game shader choices survive.
+        def irisConfig = file("run/config/iris.properties")
+        if (!irisConfig.exists()) {
+            irisConfig.parentFile.mkdirs()
+            irisConfig.text = """# Generated by prepareDevRun; delete this file to reseed.
+enableShaders=true
+shaderPack=${devShaderpackName}
+"""
+        }
+    }
+}
+
+tasks.matching { it.name == "runClient" }.configureEach {
+    dependsOn "prepareDevRun"
 }
