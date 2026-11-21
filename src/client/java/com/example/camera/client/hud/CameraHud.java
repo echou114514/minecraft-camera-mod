@@ -1,14 +1,9 @@
 package com.example.camera.client.hud;
 
-import com.mojang.blaze3d.systems.RenderSystem;
-
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.font.TextRenderer;
 import net.minecraft.client.gui.DrawContext;
-import net.minecraft.client.texture.NativeImage;
-import net.minecraft.client.texture.NativeImageBackedTexture;
 import net.minecraft.client.util.math.MatrixStack;
-import net.minecraft.util.Identifier;
 
 /**
  * 相机取景器 HUD。
@@ -17,9 +12,9 @@ import net.minecraft.util.Identifier;
  * 底部参数轨（未选中圆点 / 选中展开成细轨 + 发光指示块）、底部提示，以及各模式附加效果
  * （人像径向暗角、夜景冷色压暗、电影上下黑边）。</p>
  *
- * <p>与游戏的交互只有三个静态入口：{@link #render}、{@link #tick}、{@link #reset}。
- * 所有动画状态都是静态字段，{@code render} 负责按快照更新弹簧目标并绘制，{@code tick} 负责用真实
- * 帧间隔推进弹簧。本类不读取相机 NBT，也不修改任何渲染/分辨率设置。</p>
+ * <p>与游戏的交互只有两个静态入口：{@link #render}、{@link #reset}。
+ * 所有动画状态都是静态字段，{@code render} 负责按快照更新弹簧目标并用真实帧间隔推进弹簧。
+ * 本类不读取相机 NBT，也不修改任何渲染/分辨率设置。Classic（佳能式）取景器见 {@link ClassicHud}。</p>
  */
 public final class CameraHud {
 
@@ -66,27 +61,11 @@ public final class CameraHud {
     private static final float HINT_BOTTOM = 22f;
 
     /** 可见参数上限。 */
-    private static final int N_PARAMS = HudSnapshot.PARAM_NAMES.length;
+    private static final int N_PARAMS = HudSnapshot.PARAM_COUNT;
 
     /** 模式名辉光的四向偏移（设计单位）。 */
     private static final float[][] GLOW_OFFSETS = {
             { -1.4f, 0f }, { 1.4f, 0f }, { 0f, -1.4f }, { 0f, 1.4f }
-    };
-
-    // ==================== 纹理 ====================
-    private static final Identifier VIGNETTE_ID = Identifier.of("camera-mod", "hud_vignette");
-    /**
-     * 512 px 而不是 128 px：径向渐变被拉伸到整屏时，8 位 alpha 的量化台阶会变成
-     * 一圈圈可见的同心环。提高分辨率 + 生成时加抖动把台阶打散（见
-     * {@link #ensureVignette}）。
-     */
-    private static final int VIGNETTE_SIZE = 512;
-    /** 4×4 Bayer 抖动矩阵，用于打散 alpha 渐变的色阶。 */
-    private static final int[][] BAYER4 = {
-            { 0, 8, 2, 10 },
-            { 12, 4, 14, 6 },
-            { 3, 11, 1, 9 },
-            { 15, 7, 13, 5 }
     };
 
     // ==================== 动画状态 ====================
@@ -101,6 +80,8 @@ public final class CameraHud {
 
     /** 累计动画时间（秒），用于红色呼吸圆点。 */
     private static float time = 0f;
+    /** 上一帧的时间戳，供弹簧按真实帧间隔推进。 */
+    private static long lastFrameNano = System.nanoTime();
 
     static {
         for (int i = 0; i < N_PARAMS; i++) {
@@ -117,8 +98,8 @@ public final class CameraHud {
     /**
      * 每帧在 {@code HudRenderCallback} 里调用。
      *
-     * <p>内部自行 push/pop {@link MatrixStack}，不污染外部矩阵；同时把当前快照的目标值写进弹簧
-     * （弹簧的推进在 {@link #tick(float)} 里完成）。</p>
+     * <p>内部自行 push/pop {@link MatrixStack}，不污染外部矩阵；把当前快照的目标值写进弹簧后，
+     * 用真实帧间隔在本帧推进所有弹簧（高刷新率屏上动画不再被 20Hz 的 tick 步进量化）。</p>
      */
     public static void render(DrawContext ctx, MinecraftClient client, HudSnapshot s) {
         if (ctx == null || client == null || s == null) {
@@ -134,6 +115,9 @@ public final class CameraHud {
             return;
         }
 
+        advance((float) ((System.nanoTime() - lastFrameNano) / 1_000_000_000.0));
+        lastFrameNano = System.nanoTime();
+
         // HUD 按 Minecraft 的 GUI 坐标绘制（不再跟物理分辨率走），所以它会随
         // 「界面大小」设置一起放大/缩小，和原版热键栏同一套尺度。设计常数来自
         // 1080p + GUI scale 3 的原型，因此 1 设计单位 ≈ 1/3 * 1.2 GUI 像素。
@@ -148,9 +132,9 @@ public final class CameraHud {
         m.scale(ui, ui, 1f);
 
         // 先画模式附加效果（作用于世界之上、HUD 之下），再画 HUD 本体。
-        renderEffects(ctx, client, s, dw, dh);
+        HudEffects.render(ctx, client, s, scaledW, scaledH);
         renderTopBar(ctx, client, s, dw);
-        renderModes(ctx, client, dw, dh);
+        renderModes(ctx, client, s, dw, dh);
         renderParams(ctx, client, s, dw, dh);
         renderHint(ctx, client, s, dw, dh);
 
@@ -158,13 +142,11 @@ public final class CameraHud {
     }
 
     /**
-     * 每个客户端 tick 调用，用真实帧间隔推进所有弹簧。
-     *
-     * @param deltaSeconds 距上一 tick 的秒数（已由调用方算好）
+     * 推进所有弹簧。由 {@link #render} 用真实帧间隔调用；dt 夹住，避免卡顿
+     * 后一帧跳变。
      */
-    public static void tick(float deltaSeconds) {
-        // 夹住 dt，避免卡顿后一帧跳变。
-        float dt = Math.min(Math.max(deltaSeconds, 0f), 0.05f);
+    private static void advance(float deltaSeconds) {
+        float dt = Math.min(Math.max(deltaSeconds, 0f), 0.1f);
         if (dt <= 0f) {
             return;
         }
@@ -181,6 +163,7 @@ public final class CameraHud {
     /** 退出/进入相机模式时清空动画状态，避免下次进入时残留上一次的位置。 */
     public static void reset() {
         time = 0f;
+        lastFrameNano = System.nanoTime();
         mode.snap(0f);
         for (int i = 0; i < N_PARAMS; i++) {
             railW[i].snap(RAIL_IDLE);
@@ -237,18 +220,21 @@ public final class CameraHud {
 
     // ==================== 左侧模式列表 ====================
 
-    private static void renderModes(DrawContext ctx, MinecraftClient client, float dw, float dh) {
+    private static void renderModes(DrawContext ctx, MinecraftClient client, HudSnapshot s, float dw, float dh) {
         TextRenderer tr = client.textRenderer;
         float sv = mode.value;          // 弹簧平滑后的模式索引
         float centerY = dh * 0.5f;
 
-        for (int i = 0; i < HudSnapshot.MODE_NAMES.length; i++) {
+        for (int i = 0; i < HudSnapshot.MODE_COUNT; i++) {
             float d = i - sv;
             float ad = Math.abs(d);
 
             // 非线性衰减：越远越小、越淡、越往左缩（blur 无法真做，用透明度近似）。
             float scale = 1f / (1f + 0.32f * d * d);
             float opacity = 1f / (1f + 1.1f * d * d);
+            if (opacity < 0.02f) {
+                continue; // 远处的行已近乎不可见，跳过绘制省掉整段开销。
+            }
             float x = MODE_LEFT - Math.min(ad, 2.5f) * 7f;
 
             float textScale = MODE_TEXT_SCALE * scale;
@@ -260,12 +246,12 @@ public final class CameraHud {
             if (glow > 0.05f) {
                 int glowColor = withAlpha(0xFFFFFF, 0.16f * glow);
                 for (float[] off : GLOW_OFFSETS) {
-                    drawTextScaled(ctx, tr, HudSnapshot.MODE_NAMES[i], x + off[0], yTop + off[1],
+                    drawTextScaled(ctx, tr, s.modeNames[i], x + off[0], yTop + off[1],
                             textScale, glowColor, false);
                 }
             }
 
-            drawTextScaled(ctx, tr, HudSnapshot.MODE_NAMES[i], x, yTop, textScale,
+            drawTextScaled(ctx, tr, s.modeNames[i], x, yTop, textScale,
                     withAlpha(0xFFFFFF, opacity), true);
         }
     }
@@ -320,7 +306,7 @@ public final class CameraHud {
             if (va > 0.01f && val != null && !val.isEmpty()) {
                 boolean isAuto = val.trim().equalsIgnoreCase("AUTO");
                 int color = isAuto ? withAlpha(0xFFCC66, 0.9f * va) : withAlpha(0xFFFFFF, 0.85f * va);
-                String label = HudSnapshot.PARAM_NAMES[i] + " " + val;
+                String label = s.paramNames[i] + " " + val;
                 float tw = tr.getWidth(label);
                 drawTextScaled(ctx, tr, label, x + (w - tw) * 0.5f, cy + 13f, 1.05f, color, true);
             }
@@ -340,68 +326,7 @@ public final class CameraHud {
     }
 
     // ==================== 模式附加效果 ====================
-
-    private static void renderEffects(DrawContext ctx, MinecraftClient client, HudSnapshot s, float dw, float dh) {
-        int w = Math.round(dw);
-        int h = Math.round(dh);
-
-        // 夜景：整体冷色压暗 + 稍强的暗角，营造低光长曝氛围。
-        if (s.night) {
-            ctx.fill(0, 0, w, h, withAlpha(0x0A1A2E, 0.30f));
-            drawVignette(ctx, client, w, h, 0.55f);
-        }
-
-        // 人像：柔和的背景虚化暗角（径向渐变贴图）。
-        if (s.portrait) {
-            drawVignette(ctx, client, w, h, 0.62f);
-        }
-
-        // 电影：很淡的灰绿平灰叠加（近似 Log）+ 上下黑色档条。
-        if (s.cinemaBars) {
-            ctx.fill(0, 0, w, h, withAlpha(0x2E332B, 0.07f));
-            int bar = Math.round(dh * 0.12f);
-            ctx.fill(0, 0, w, bar, 0xF8000000);
-            ctx.fill(0, h - bar, w, h, 0xF8000000);
-        }
-    }
-
-    /** 把径向渐变暗角贴图铺满全屏，{@code alphaMul} 控制强度。 */
-    private static void drawVignette(DrawContext ctx, MinecraftClient client, int w, int h, float alphaMul) {
-        ensureVignette(client);
-        RenderSystem.enableBlend();
-        RenderSystem.defaultBlendFunc();
-        RenderSystem.setShaderColor(1f, 1f, 1f, alphaMul);
-        // 最后两个参数是 UV 归一化用的「纹理尺寸」。必须传目标宽高，否则
-        // 1920/128 = 15 会让暗角贴图在屏幕上平铺成 15×8 个圆形（这才是
-        // 「大量圆形半透明波纹」的真凶）。
-        ctx.drawTexture(VIGNETTE_ID, 0, 0, 0, 0, w, h, w, h);
-        RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
-        RenderSystem.disableBlend();
-    }
-
-    /** 懒加载生成一张 512×512 的径向渐变贴图（中心透明 → 边缘变黑）。 */
-    private static void ensureVignette(MinecraftClient client) {
-        if (client.getTextureManager().getOrDefault(VIGNETTE_ID, null) != null) {
-            return;
-        }
-        NativeImage img = new NativeImage(VIGNETTE_SIZE, VIGNETTE_SIZE, false);
-        float inner = 0.38f;    // 38% 半径以内透明，向外加深
-        for (int y = 0; y < VIGNETTE_SIZE; y++) {
-            for (int x = 0; x < VIGNETTE_SIZE; x++) {
-                float nx = ((x + 0.5f) / VIGNETTE_SIZE) * 2f - 1f;
-                float ny = ((y + 0.5f) / VIGNETTE_SIZE) * 2f - 1f;
-                float r = (float) Math.sqrt(nx * nx + ny * ny);
-                float t = clamp01((r - inner) / (1f - inner));
-                t = t * t * (3f - 2f * t);     // smoothstep，边缘过渡更柔和
-                // 抖动一个 alpha 台阶，避免 8 位渐变拉伸后出现同心圆环。
-                float dither = (BAYER4[y & 3][x & 3] / 16f) - 0.5f;
-                float a = t * 0.62f + dither / 255f;
-                int alpha = Math.max(0, Math.min(255, Math.round(a * 255f)));
-                img.setColor(x, y, alpha << 24);    // 黑色，仅 alpha 有渐变
-            }
-        }
-        client.getTextureManager().registerTexture(VIGNETTE_ID, new NativeImageBackedTexture(img));
-    }
+    // 已抽到 HudEffects（Neon/Classic 共用）；CameraHud 只保留 Neon 本体的绘制。
 
     // ==================== 绘制工具 ====================
 
@@ -497,55 +422,8 @@ public final class CameraHud {
         return v < 0f ? 0f : (v > 1f ? 1f : v);
     }
 
-    // ==================== 弹簧 ====================
-
-    /**
-     * 阻尼弹簧（固定子步长积分，保证不同帧率下表现一致）。
-     * 移植自 HTML 原型的 {@code Spring}：a = (-k*(v-target) - c*velocity) / m。
-     */
-    private static final class Spring {
-        private float value;
-        private float target;
-        private float velocity;
-        private final float stiffness;
-        private final float damping;
-        private final float mass;
-
-        Spring(float value, float stiffness, float damping) {
-            this.value = value;
-            this.target = value;
-            this.stiffness = stiffness;
-            this.damping = damping;
-            this.mass = 1f;
-        }
-
-        void setTarget(float t) {
-            this.target = t;
-        }
-
-        /** 立即归位到某个值并清零速度。 */
-        void snap(float v) {
-            this.value = v;
-            this.target = v;
-            this.velocity = 0f;
-        }
-
-        void update(float dt) {
-            if (dt <= 0f) {
-                return;
-            }
-            int steps = Math.max(1, (int) Math.ceil(dt / 0.008f));
-            float h = dt / steps;
-            for (int i = 0; i < steps; i++) {
-                float a = (-stiffness * (value - target) - damping * velocity) / mass;
-                velocity += a * h;
-                value += velocity * h;
-            }
-            // 收敛判定，避免长尾抖动。
-            if (Math.abs(velocity) < 0.0015f && Math.abs(value - target) < 0.0008f) {
-                value = target;
-                velocity = 0f;
-            }
-        }
+    /** 预热暗角贴图（已委托给 HudEffects）。 */
+    public static void prewarm(MinecraftClient client) {
+        HudEffects.prewarm(client);
     }
 }
