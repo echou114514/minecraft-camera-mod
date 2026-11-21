@@ -6,11 +6,25 @@
     "GRG"
   ],
   "key": {
-    "B": { "item": "minecraft:stone_button" },
-    "I": { "item": "minecraft:iron_block" },
-    "C": { "item": "camera-mod:half_frame_cmos" },
-    "G": { "item": "minecraft:glass" },
-    "R": { "item": "minecraft:redstone_block" }
+    "B": {
+      "item": "minecraft:stone_button"
+    },
+    "I": {
+      "item": "minecraft:iron_block"
+    },
+    "C": {
+      "item": "camera-mod:half_frame_cmos"
+    },
+    "G": {
+      "item": "minecraft:glass"
+    },
+    "R": {
+      "item": "minecraft:redstone_block"
+    }
   },
-  "result": { "id": "camera-mod:lumin_h", "count": 1 }
+  "result": {
+    "id": "camera-mod:lumin_h",
+    "count": 1
+  },
+  "category": "equipment"
 }

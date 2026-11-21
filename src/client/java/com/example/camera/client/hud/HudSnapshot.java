@@ -4,22 +4,37 @@ package com.example.camera.client.hud;
  * Per-frame data the game hands to {@code CameraHud}. The HUD only reads this;
  * it never touches the camera NBT or the exposure pipeline directly.
  *
- * <p>All index/array based fields are cheap to fill every frame and should be
- * treated as read-only by the HUD.</p>
+ * <p>Strings are resolved from translation keys once per tick by the snapshot
+ * filler; the HUD treats them as read-only. All index/array based fields are
+ * cheap to fill and read.</p>
  */
 public final class HudSnapshot {
-    /** Mode labels shown in the left column (top to bottom). */
-    public static final String[] MODE_NAMES = { "自动", "照片", "人像", "夜景", "电影" };
+    public static final int MODE_COUNT = 5;
+    public static final int PARAM_COUNT = 6;
 
-    /** Parameter labels (bottom rail). 焦距 is only shown for zoom lenses. */
-    public static final String[] PARAM_NAMES = { "曝光", "ISO", "快门", "白平衡", "对焦", "焦距" };
+    /** Translation keys for the mode labels (top to bottom). */
+    public static final String[] MODE_KEYS = {
+            "hud.camera-mod.mode.0", "hud.camera-mod.mode.1", "hud.camera-mod.mode.2",
+            "hud.camera-mod.mode.3", "hud.camera-mod.mode.4"
+    };
 
-    /** Top-left "live" badge, e.g. {@code "4K · 60"}. */
-    public String liveLabel = "8K · 60";
+    /** Translation keys for the parameter labels (bottom rail). 焦距 shows only for zoom lenses. */
+    public static final String[] PARAM_KEYS = {
+            "hud.camera-mod.param.0", "hud.camera-mod.param.1", "hud.camera-mod.param.2",
+            "hud.camera-mod.param.3", "hud.camera-mod.param.4", "hud.camera-mod.param.5"
+    };
+
+    /** Top-left "live" badge, e.g. {@code "全画幅 · 8K"}. */
+    public String liveLabel = "8K";
     /** Top-right exposure readout, e.g. {@code "ƒ1.8 · 1/120 · ISO200 · +0.0EV"}. */
     public String readout = "";
 
-    /** Selected mode, 0..MODE_NAMES.length-1. */
+    /** Mode labels resolved from {@link #MODE_KEYS}. */
+    public final String[] modeNames = new String[MODE_COUNT];
+    /** Parameter labels resolved from {@link #PARAM_KEYS}. */
+    public final String[] paramNames = new String[PARAM_COUNT];
+
+    /** Selected mode, 0..MODE_COUNT-1. */
     public int modeIndex = 0;
     /** Selected parameter, 0..paramCount-1. */
     public int paramIndex = 0;
@@ -27,9 +42,9 @@ public final class HudSnapshot {
     public int paramCount = 5;
 
     /** Rail indicator position 0..1 for each parameter (0 = min, 1 = max). */
-    public final float[] paramFill = new float[PARAM_NAMES.length];
+    public final float[] paramFill = new float[PARAM_COUNT];
     /** Formatted value under each parameter, e.g. {@code "ISO 400"}. null hides it. */
-    public final String[] paramValues = new String[PARAM_NAMES.length];
+    public final String[] paramValues = new String[PARAM_COUNT];
 
     /** 自动: the rail should show AUTO for the exposure parameters. */
     public boolean autoMode = false;
@@ -41,5 +56,23 @@ public final class HudSnapshot {
     public boolean night = false;
 
     /** Bottom hint line. */
-    public String hint = "↑ ↓ 切换模式  ·  [ ] 切换参数  ·  ← → 调整数值";
+    public String hint = "";
+
+    // ---- Classic（佳能式）取景器的原始读数，由快照填充端按 tick 解析 ----
+    /** 曝光模式字母：A+ / P / Tv / Av / M（B 暂不开放）。 */
+    public String modeLetter = "P";
+    /** 佳能格式快门：1/80、0"5、2"。 */
+    public String shutterText = "1/125";
+    /** 佳能格式光圈：F5.6。 */
+    public String apertureText = "F5.6";
+    /** ISO 数值文本。 */
+    public String isoText = "100";
+    /** 白平衡自动？ */
+    public boolean wbAuto = true;
+    /** 白平衡数值（手动时的开尔文）。 */
+    public int wbValue = 5500;
+    /** 当前 EV 偏移（测光误差 + 手动补偿），驱动 Classic 的标尺指针。 */
+    public float evOffset = 0f;
+    /** AF 状态：0 空闲，1 对焦中，2 合焦确认。 */
+    public int afState = 0;
 }

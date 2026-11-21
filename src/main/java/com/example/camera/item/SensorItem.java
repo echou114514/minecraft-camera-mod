@@ -1,4 +1,4 @@
-package item;
+package com.example.camera.item;
 
 import java.util.List;
 
@@ -8,10 +8,10 @@ import net.minecraft.item.tooltip.TooltipType;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 
-public class Chuanganqi extends Item {
+public class SensorItem extends Item {
     private final boolean fullFrame;
 
-    public Chuanganqi(Settings settings, boolean fullFrame) {
+    public SensorItem(Settings settings, boolean fullFrame) {
         super(settings);
         this.fullFrame = fullFrame;
     }
@@ -20,10 +20,10 @@ public class Chuanganqi extends Item {
 
     @Override
     public void appendTooltip(ItemStack stack, TooltipContext ctx, List<Text> tooltip, TooltipType type) {
-        tooltip.add(Text.literal(fullFrame ? "全画幅 CMOS" : "半画幅 CMOS")
+        tooltip.add(Text.translatable(fullFrame
+                ? "item.camera-mod.sensor.fullframe" : "item.camera-mod.sensor.halfframe")
                 .formatted(fullFrame ? Formatting.GOLD : Formatting.AQUA));
-        tooltip.add(Text.literal(fullFrame
-                ? "噪点阈值: ISO 3200 / 12800"
-                : "噪点阈值: ISO 1600 / 6400").formatted(Formatting.GRAY));
+        tooltip.add(Text.translatable("item.camera-mod.sensor.noise_threshold",
+                fullFrame ? 3200 : 1600, fullFrame ? 12800 : 6400).formatted(Formatting.GRAY));
     }
 }

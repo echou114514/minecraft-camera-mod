@@ -1,10 +1,13 @@
-# Automatically build the project and run any configured tests for every push
-# and submitted pull request. This can help catch issues that only occur on
-# certain platforms or Java versions, and provides a first line of defence
-# against bad commits.
-
 name: build
-on: [pull_request, push]
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -12,15 +15,18 @@ jobs:
     steps:
       - name: checkout repository
         uses: actions/checkout@v6
+        with:
+          # Full history so the derived dev version (commit count + hash) is real.
+          fetch-depth: 0
       - name: validate gradle wrapper
         uses: gradle/actions/wrapper-validation@v6
       - name: setup jdk
         uses: actions/setup-java@v5
         with:
-          java-version: '25'
-          distribution: 'microsoft'
-      - name: make gradle wrapper executable
-        run: chmod +x ./gradlew
+          java-version: '21'
+          distribution: 'temurin'
+      - name: setup gradle (cached)
+        uses: gradle/actions/setup-gradle@v4
       - name: build
         run: ./gradlew build
       - name: capture build artifacts

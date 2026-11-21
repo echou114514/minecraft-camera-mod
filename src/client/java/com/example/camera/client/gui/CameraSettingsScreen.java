@@ -2,9 +2,10 @@ package com.example.camera.client.gui;
 
 import com.example.camera.client.AutoExposure;
 import com.example.camera.client.ExposureMode;
+import com.example.camera.client.hud.SegmentDigits;
 import com.example.camera.client.metering.Metering;
-import data.LensSpec;
-import item.Jishen;
+import com.example.camera.data.LensSpec;
+import com.example.camera.item.CameraBodyItem;
 
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
@@ -13,12 +14,13 @@ import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.text.Text;
+import net.minecraft.util.Formatting;
 import org.lwjgl.glfw.GLFW;
 
 public class CameraSettingsScreen extends Screen {
 
-    private static final int PANEL_W = 500;
-    private static final int PANEL_H = 200;
+    private static final int MAX_PANEL_W = 500;
+    private static final int MAX_PANEL_H = 200;
     private static final int COLOR = 0xFFFFFFFF;
     private static final int COLOR_SEL = 0xFFFFAA00;
     private static final int LINE_COLOR = 0x55FFFFFF;
@@ -37,7 +39,11 @@ public class CameraSettingsScreen extends Screen {
     private static final int TOTAL_REGIONS = 10;
     private final int[][] regions = new int[TOTAL_REGIONS][4];
 
-    private final ItemStack target;
+    /** Panel size adapts to the window so GUI scale 4 / small windows fit. */
+    private int panelW = MAX_PANEL_W;
+    private int panelH = MAX_PANEL_H;
+
+    private ItemStack target;
     private ExposureMode mode;
     private int iso, shutter, wb, tone;
     private int evCompStep = 0;
@@ -51,9 +57,9 @@ public class CameraSettingsScreen extends Screen {
 
     // 根据焦距计算最近对焦距离 (焦距越长，最近对焦距离越远)
     private float getMinFocusDistance() {
-        int focal = 50; // 默认值
+        int focal = 50;
         if (target != null) {
-            LensSpec spec = Jishen.getLensSpec(target);
+            LensSpec spec = CameraBodyItem.getLensSpec(target);
             focal = spec.focalLength;
         }
         return Math.max(0.5f, focal / 100.0f);
@@ -64,9 +70,13 @@ public class CameraSettingsScreen extends Screen {
     }
 
     public CameraSettingsScreen(ItemStack stack) {
-        super(Text.literal("相机设置"));
+        super(Text.translatable("gui.camera-mod.title"));
         this.target = stack;
-        NbtCompound nbt = Jishen.getSettings(stack);
+        loadFromStack(stack);
+    }
+
+    private void loadFromStack(ItemStack stack) {
+        NbtCompound nbt = CameraBodyItem.getSettings(stack);
 
         String modeStr = nbt.getString("mode");
         mode = ExposureMode.M;
@@ -82,7 +92,7 @@ public class CameraSettingsScreen extends Screen {
         aperture = nbt.getFloat("aperture");
         evCompStep = nbt.getInt("evCompStep");
         autoEvStep = nbt.getInt("autoEvStep");
-        evAuto = Jishen.isEvAuto(nbt);
+        evAuto = CameraBodyItem.isEvAuto(nbt);
 
         isoAuto = nbt.getBoolean("isoAuto");
         shutterAuto = nbt.getBoolean("shutterAuto");
@@ -91,25 +101,19 @@ public class CameraSettingsScreen extends Screen {
         toneAuto = nbt.getBoolean("toneAuto");
         focusAuto = nbt.getBoolean("focusAuto");
 
-        LensSpec spec = Jishen.getLensSpec(stack);
+        LensSpec spec = CameraBodyItem.getLensSpec(stack);
         minAperture = spec.maxAperture;
         if (aperture < minAperture) aperture = minAperture;
-
-        applyModeRules();
     }
 
-    private void applyModeRules() {
-        switch (mode) {
-            case A_PLUS -> { isoAuto = true; shutterAuto = true; apertureAuto = true; wbAuto = true; toneAuto = true; }
-            case P -> { shutterAuto = true; apertureAuto = true; wbAuto = true; toneAuto = true; }
-            case TV -> { shutterAuto = false; apertureAuto = true; wbAuto = true; toneAuto = true; }
-            case AV -> { shutterAuto = true; apertureAuto = false; wbAuto = true; toneAuto = true; }
-            case M, B -> { shutterAuto = false; apertureAuto = false; wbAuto = true; toneAuto = true; }
-        }
-    }
-
+    /**
+     * Overwrites only the fields this screen manages on top of the *current*
+     * settings, so keys the screen does not know about (hudMode, future
+     * additions) survive closing the panel.
+     */
     private void syncToNbt() {
-        NbtCompound nbt = Jishen.defaultSettings();
+        if (target == null || !CameraBodyItem.isCamera(target)) return;
+        NbtCompound nbt = CameraBodyItem.getSettings(target);
         nbt.putString("mode", mode.name);
         nbt.putInt("iso", iso);
         nbt.putInt("shutter", shutter);
@@ -126,51 +130,94 @@ public class CameraSettingsScreen extends Screen {
         nbt.putBoolean("wbAuto", wbAuto);
         nbt.putBoolean("toneAuto", toneAuto);
         nbt.putBoolean("focusAuto", focusAuto);
-        Jishen.setSettings(target, nbt);
+        CameraBodyItem.setSettings(target, nbt);
+    }
+
+    /** The stack reference can go stale after inventory syncs; re-grab the main hand. */
+    private void refreshTarget() {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null) return;
+        ItemStack main = client.player.getMainHandStack();
+        if (CameraBodyItem.isCamera(main) && (target == null || main.getItem() == target.getItem())) {
+            target = main;
+        }
+    }
+
+    /** Mode switches force their canonical auto flags; opening the panel never does. */
+    private void applyModeRules() {
+        switch (mode) {
+            case A_PLUS -> { isoAuto = true; shutterAuto = true; apertureAuto = true; wbAuto = true; toneAuto = true; }
+            case P -> { shutterAuto = true; apertureAuto = true; wbAuto = true; toneAuto = true; }
+            case TV -> { shutterAuto = false; apertureAuto = true; wbAuto = true; toneAuto = true; }
+            case AV -> { shutterAuto = true; apertureAuto = false; wbAuto = true; toneAuto = true; }
+            case M, B -> { shutterAuto = false; apertureAuto = false; wbAuto = true; toneAuto = true; }
+        }
+    }
+
+    @Override
+    public void removed() {
+        syncToNbt();
+        super.removed();
     }
 
     @Override
     public void render(DrawContext ctx, int mouseX, int mouseY, float delta) {
+        refreshTarget();
+
+        panelW = Math.min(MAX_PANEL_W, this.width - 20);
+        panelH = Math.min(MAX_PANEL_H, this.height - 20);
         int w = this.width;
         int h = this.height;
-        int px = (w - PANEL_W) / 2;
-        int py = (h - PANEL_H) / 2;
+        int px = (w - panelW) / 2;
+        int py = (h - panelH) / 2;
 
-        ctx.fill(px, py, px + PANEL_W, py + PANEL_H, 0xFF000000);
-        drawFrame(ctx, px, py, PANEL_W, PANEL_H);
+        // 佳能 6D 背屏：近全黑底 + 白色读数 + 细分区框。
+        ctx.fill(px, py, px + panelW, py + panelH, 0xF2050505);
+        drawFrame(ctx, px, py, panelW, panelH);
 
-        int innerX = px + 15;
-        int innerW = PANEL_W - 30;
-        int curY = py + 12;
+        int innerX = px + 12;
+        int innerW = panelW - 24;
+        int curY = py + 10;
 
-        int colW = innerW / 3;
-        drawValue(ctx, innerX,            curY, colW, 30, "快门 " + Metering.formatShutter(shutter), R_SHUTTER,  autoStr(shutterAuto));
-        drawValue(ctx, innerX + colW,     curY, colW, 30, "f/" + fmtAp(aperture),                    R_APERTURE, autoStr(apertureAuto));
-        drawValue(ctx, innerX + 2 * colW, curY, colW, 30, "ISO " + (isoAuto ? "AUTO" : String.valueOf(iso)), R_ISO, autoStr(isoAuto));
-        curY += 30;
-        drawHLine(ctx, innerX, curY, innerX + innerW);
-        curY += 8;
+        // ---- 行 1（佳能顶行）：模式字母 | 快门 | F 值 | ISO ----
+        int colMode = Math.round(innerW * 0.17f);
+        int colShutter = Math.round(innerW * 0.27f);
+        int colAperture = Math.round(innerW * 0.27f);
+        int colIso = innerW - colMode - colShutter - colAperture;
+        int rowH1 = 44;
+        drawModeBig(ctx, innerX, curY, colMode, rowH1);
+        drawSegmentValue(ctx, innerX + colMode, curY, colShutter, rowH1,
+                Metering.formatShutterCanon(shutter), R_SHUTTER, autoStr(shutterAuto));
+        drawApertureValue(ctx, innerX + colMode + colShutter, curY, colAperture, rowH1,
+                R_APERTURE, autoStr(apertureAuto));
+        drawIsoValue(ctx, innerX + colMode + colShutter + colAperture, curY, colIso, rowH1,
+                R_ISO, autoStr(isoAuto));
+        curY += rowH1 + 6;
 
-        drawEvBar(ctx, innerX, curY, innerW, 42, evCompStep, R_EV, evAuto);
-        curY += 42;
-        drawHLine(ctx, innerX, curY, innerX + innerW);
-        curY += 8;
+        // ---- 行 2：曝光补偿标尺（-3..0..+3，1/3 档刻度）----
+        drawEvBar(ctx, innerX, curY, innerW, 40, evCompStep, R_EV, evAuto);
+        curY += 40 + 6;
 
+        // ---- 行 3：白平衡 | 色调 | 对焦 ----
+        int rowH3 = 30;
         int colW3 = innerW / 3;
-        drawValue(ctx, innerX,             curY, colW3, 30, wbAuto ? "AWB" : wb + "K",                 R_WB,    autoStr(wbAuto));
-        drawValue(ctx, innerX + colW3,     curY, colW3, 30, "色调 " + fmtSigned(tone),                  R_TONE,  autoStr(toneAuto));
+        drawBoxedValue(ctx, innerX, curY, colW3, rowH3,
+                wbAuto ? "AWB" : wb + "K", R_WB, autoStr(wbAuto));
+        drawBoxedValue(ctx, innerX + colW3, curY, colW3, rowH3,
+                Text.translatable("gui.camera-mod.tone", fmtSigned(tone)).getString(),
+                R_TONE, autoStr(toneAuto));
         String focusStr = Float.isInfinite(focus) ? "∞" : String.format("%.1fm", focus);
-        drawValue(ctx, innerX + 2 * colW3, curY, colW3, 30, "对焦 " + focusStr,   R_FOCUS, autoStr(focusAuto));
-        curY += 30;
-        drawHLine(ctx, innerX, curY, innerX + innerW);
-        curY += 8;
+        drawBoxedValue(ctx, innerX + 2 * colW3, curY, innerW - 2 * colW3, rowH3,
+                Text.translatable("gui.camera-mod.focus", focusStr).getString(),
+                R_FOCUS, autoStr(focusAuto));
+        curY += rowH3 + 6;
 
-        int colW4a = innerW / 4;
-        int colW4b = innerW / 4;
-        int colW4c = innerW - colW4a - colW4b;
-        drawValue(ctx, innerX,                   curY, colW4a, 30, mode.name,                        R_MODE,   "");
-        drawValue(ctx, innerX + colW4a,          curY, colW4b, 30, Metering.currentMode.displayName, R_METER,  "");
-        drawValue(ctx, innerX + colW4a + colW4b, curY, colW4c, 30, "A-EV " + fmtAutoEv(autoEvStep),  R_AUTOEV, "");
+        // ---- 行 4：测光模式 | 自动 EV 偏移 ----
+        int colW4 = innerW / 2;
+        drawBoxedValue(ctx, innerX, curY, colW4, rowH3,
+                Metering.currentMode.displayName(), R_METER, "");
+        drawBoxedValue(ctx, innerX + colW4, curY, innerW - colW4, rowH3,
+                "A-EV " + fmtAutoEv(autoEvStep), R_AUTOEV, "");
     }
 
     private void drawFrame(DrawContext ctx, int x, int y, int w, int h) {
@@ -190,86 +237,119 @@ public class CameraSettingsScreen extends Screen {
         float v = step / 3.0f;
         return (v >= 0 ? "+" : "") + String.format("%.1f", v);
     }
-    private static String fmtAp(float a) {
-        return a == (int) a ? String.valueOf((int) a) : String.format("%.1f", a);
-    }
 
-    private void drawValue(DrawContext ctx, int x, int y, int w, int h,
-                           String value, int index, String autoMark) {
-        boolean sel = (selected == index);
-        int color = sel ? COLOR_SEL : COLOR;
-
+    /** 记录区域并画细分区框（佳能屏幕上的图标格）。 */
+    private void drawRegionBox(DrawContext ctx, int index, int x, int y, int w, int h) {
         regions[index][0] = x;
         regions[index][1] = y;
         regions[index][2] = w;
         regions[index][3] = h;
+        int c = 0x4DFFFFFF;
+        ctx.fill(x, y, x + w, y + 1, c);
+        ctx.fill(x, y + h - 1, x + w, y + h, c);
+        ctx.fill(x, y, x + 1, y + h, c);
+        ctx.fill(x + w - 1, y, x + w, y + h, c);
+    }
 
-        MatrixStack m = ctx.getMatrices();
-        m.push();
-        m.scale(2f, 2f, 1f);
-
-        int sx = x / 2;
-        int sy = y / 2;
-        int sw = w / 2;
-
-        int textW = textRenderer.getWidth(value);
-        int textX = sx + (sw - textW) / 2;
-        int textY = sy + (h / 2 - 8) / 2;
-
-        ctx.drawText(textRenderer, value, textX, textY, color, false);
-
+    private void drawAutoMark(DrawContext ctx, int x, int y, int w, String autoMark, int selColor) {
         if (!autoMark.isEmpty()) {
-            ctx.drawText(textRenderer, autoMark, sx + sw - 8, sy + 2,
+            ctx.drawText(textRenderer, autoMark, x + w - 10, y + 2,
                     autoMark.equals("A") ? 0xFF55FF55 : 0xFFAAAAAA, false);
         }
-
-        m.pop();
     }
 
-    private void drawEvBar(DrawContext ctx, int x, int y, int w, int h,
-                           int step, int index, boolean auto) {
-        boolean sel = (selected == index);
+    /** 行 1 的大号模式字母（A+/P/Tv/Av/M），点击循环切换。 */
+    private void drawModeBig(DrawContext ctx, int x, int y, int w, int h) {
+        drawRegionBox(ctx, R_MODE, x, y, w, h);
+        boolean sel = (selected == R_MODE);
         int color = sel ? COLOR_SEL : COLOR;
-
-        regions[index][0] = x;
-        regions[index][1] = y;
-        regions[index][2] = w;
-        regions[index][3] = h;
 
         MatrixStack m = ctx.getMatrices();
         m.push();
-        m.scale(2f, 2f, 1f);
-        int sx = x / 2;
-        int sy = y / 2;
-        int sw = w / 2;
-
-        int cx = sx + sw / 2;
-        int spacing = 24;
-        for (int i = -3; i <= 3; i++) {
-            String s = (i > 0 ? "+" : "") + i;
-            int tw = textRenderer.getWidth(s);
-            ctx.drawText(textRenderer, s, cx + i * spacing - tw / 2, sy, color, false);
-        }
-
-        int tickY = sy + 10;
-        for (int i = -9; i <= 9; i++) {
-            if (i % 3 == 0) continue;
-            int tx = cx + i * spacing / 3;
-            ctx.fill(tx, tickY, tx + 1, tickY + 4, color);
-        }
-
-        String evAutoMark = auto ? "A" : "M";
-        ctx.drawText(textRenderer, evAutoMark, sx + sw - 8, sy,
-                auto ? 0xFF55FF55 : 0xFFAAAAAA, false);
+        m.scale(3f, 3f, 1f);
+        int textW = textRenderer.getWidth(mode.name);
+        int textH = 9;
+        ctx.drawText(textRenderer, mode.name,
+                x / 3 + (w / 3 - textW) / 2, y / 3 + (h / 3 - textH) / 2, color, false);
         m.pop();
+    }
 
-        double ev = step / 3.0;
-        int screenCx = x + w / 2;
-        int screenSpacing = 40;
-        int pointerX = screenCx + (int) (ev * screenSpacing);
-        int pointerY = y + 30;
-        ctx.fill(pointerX - 1, pointerY, pointerX + 1, pointerY + 1, color);
-        ctx.fill(pointerX - 2, pointerY + 1, pointerX + 2, pointerY + 2, color);
+    /** 数码管数字值（快门等），水平垂直居中 + 右侧 A/M。 */
+    private void drawSegmentValue(DrawContext ctx, int x, int y, int w, int h,
+                                  String value, int index, String autoMark) {
+        drawRegionBox(ctx, index, x, y, w, h);
+        boolean sel = (selected == index);
+        float gh = 15f;
+        float tw = SegmentDigits.width(value, gh);
+        SegmentDigits.draw(ctx, value, x + (w - tw) / 2f, y + (h - gh) / 2f, gh,
+                sel ? COLOR_SEL : COLOR);
+        drawAutoMark(ctx, x, y, w, autoMark, COLOR_SEL);
+    }
+
+    /** 光圈单元：F 用字体 + 数码管数字。 */
+    private void drawApertureValue(DrawContext ctx, int x, int y, int w, int h,
+                                   int index, String autoMark) {
+        drawRegionBox(ctx, index, x, y, w, h);
+        boolean sel = (selected == index);
+        int color = sel ? COLOR_SEL : COLOR;
+
+        String ap = Metering.formatAperture(aperture);   // F5.6
+        String digits = ap.substring(1);
+        float gh = 15f;
+        float fw = textRenderer.getWidth("F") * 1.3f;
+        float dw = SegmentDigits.width(digits, gh);
+        float total = fw + 2 + dw;
+        float sx = x + (w - total) / 2f;
+
+        MatrixStack m = ctx.getMatrices();
+        m.push();
+        m.translate(sx, y + (h - 9) / 2f - 3, 0f);
+        m.scale(1.3f, 1.3f, 1f);
+        ctx.drawText(textRenderer, "F", 0, 0, color, false);
+        m.pop();
+        SegmentDigits.draw(ctx, digits, sx + fw + 2, y + (h - gh) / 2f, gh, color);
+        drawAutoMark(ctx, x, y, w, autoMark, COLOR_SEL);
+    }
+
+    /** ISO 单元：ISO 徽标 + 数码管数字。 */
+    private void drawIsoValue(DrawContext ctx, int x, int y, int w, int h,
+                              int index, String autoMark) {
+        drawRegionBox(ctx, index, x, y, w, h);
+        boolean sel = (selected == index);
+        int color = sel ? COLOR_SEL : COLOR;
+
+        String digits = String.valueOf(iso);
+        float gh = 15f;
+        float badgeW = textRenderer.getWidth("ISO") * 1.1f;
+        float dw = SegmentDigits.width(digits, gh);
+        float total = badgeW + 4 + dw;
+        float sx = x + (w - total) / 2f;
+
+        MatrixStack m = ctx.getMatrices();
+        m.push();
+        m.translate(sx, y + (h - 9) / 2f - 2, 0f);
+        m.scale(1.1f, 1.1f, 1f);
+        ctx.drawText(textRenderer, "ISO", 0, 0, color, false);
+        m.pop();
+        SegmentDigits.draw(ctx, digits, sx + badgeW + 4, y + (h - gh) / 2f, gh, color);
+        drawAutoMark(ctx, x, y, w, autoMark, COLOR_SEL);
+    }
+
+    /** 行 3/4 的小分区：文字 + 细框 + 右侧 A/M。 */
+    private void drawBoxedValue(DrawContext ctx, int x, int y, int w, int h,
+                                String value, int index, String autoMark) {
+        drawRegionBox(ctx, index, x, y, w, h);
+        boolean sel = (selected == index);
+        int color = sel ? COLOR_SEL : COLOR;
+
+        MatrixStack m = ctx.getMatrices();
+        m.push();
+        m.scale(1.4f, 1.4f, 1f);
+        int textW = textRenderer.getWidth(value);
+        ctx.drawText(textRenderer, value,
+                (int) ((x + 8) / 1.4f), (int) ((y + h / 2f - 5) / 1.4f), color, false);
+        m.pop();
+        drawAutoMark(ctx, x, y, w, autoMark, COLOR_SEL);
     }
 
     @Override
@@ -293,7 +373,8 @@ public class CameraSettingsScreen extends Screen {
                 return true;
             }
         }
-        selected = -1;
+        // Clicking empty space keeps the current selection so the scroll wheel
+        // keeps working.
         return super.mouseClicked(mx, my, button);
     }
 
@@ -322,11 +403,10 @@ public class CameraSettingsScreen extends Screen {
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
         if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
-            syncToNbt();
             close();
             return true;
         }
-        if (selected < 0) return true;
+        if (selected < 0) return super.keyPressed(keyCode, scanCode, modifiers);
 
         if (keyCode == GLFW.GLFW_KEY_LEFT || keyCode == GLFW.GLFW_KEY_DOWN) {
             adjust(selected, -1);
@@ -426,8 +506,9 @@ public class CameraSettingsScreen extends Screen {
     }
 
     private static int stepArrayInt(int[] arr, int v, int dir) {
-        int idx = 0;
-        for (int i = 0; i < arr.length; i++) if (arr[i] == v) { idx = i; break; }
+        // Values written outside this table (e.g. the HUD's 1/48 cinema
+        // shutter) snap to the nearest stop instead of jumping to index 0.
+        int idx = AutoExposure.nearestIndex(arr, v);
         idx += dir;
         if (idx < 0) idx = 0;
         if (idx >= arr.length) idx = arr.length - 1;
@@ -443,6 +524,44 @@ public class CameraSettingsScreen extends Screen {
         float result = arr[idx];
         if (result < minV) result = minV;
         return result;
+    }
+
+    /**
+     * 曝光补偿标尺（佳能式）：整数位数码管数字，1/3 档短刻度，指针楔，
+     * 右侧 A/M 切换。选中时高亮。
+     */
+    private void drawEvBar(DrawContext ctx, int x, int y, int w, int h,
+                           int step, int index, boolean auto) {
+        drawRegionBox(ctx, index, x, y, w, h);
+        boolean sel = (selected == index);
+        int color = sel ? COLOR_SEL : COLOR;
+
+        int cx = x + w / 2;
+        int pxPerEv = Math.max(18, Math.min(28, (w - 40) / 9));
+        int numberY = y + 6;
+        int tickY = numberY + 11;
+
+        for (int i = -3; i <= 3; i++) {
+            String label = (i > 0 ? "+" : "") + i;
+            float gw = SegmentDigits.width(label, 8f);
+            SegmentDigits.draw(ctx, label, cx + i * pxPerEv - gw / 2f, numberY, 8f, color);
+        }
+        for (int i = -9; i <= 9; i++) {
+            if (i % 3 == 0) continue;
+            int tx = cx + i * pxPerEv / 3;
+            ctx.fill(tx, tickY, tx + 1, tickY + 4, 0x70FFFFFF);
+        }
+
+        String evAutoMark = auto ? "A" : "M";
+        ctx.drawText(textRenderer, evAutoMark, x + w - 10, y + 2,
+                auto ? 0xFF55FF55 : 0xFFAAAAAA, false);
+
+        double ev = step / 3.0;
+        int pointerX = cx + (int) Math.round(ev * pxPerEv);
+        int pointerY = tickY + 6;
+        ctx.fill(pointerX - 3, pointerY, pointerX + 3, pointerY + 1, color);
+        ctx.fill(pointerX - 2, pointerY + 1, pointerX + 2, pointerY + 2, color);
+        ctx.fill(pointerX - 1, pointerY + 2, pointerX + 1, pointerY + 3, color);
     }
 
     @Override

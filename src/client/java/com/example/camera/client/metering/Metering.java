@@ -1,5 +1,7 @@
 package com.example.camera.client.metering;
 
+import com.example.camera.client.config.CameraModConfig;
+
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.Entity;
 import net.minecraft.util.hit.BlockHitResult;
@@ -12,7 +14,6 @@ import net.minecraft.world.World;
 
 public class Metering {
     private static final double MAX_DIST = 80.0;
-    private static final int INTERVAL_TICKS = 1;
     private static final double EMA_ALPHA = 0.3;
 
     private static final int GRID_X = 15;
@@ -41,7 +42,7 @@ public class Metering {
     public static double getSceneEV() { return smoothedEV; }
 
     public static void tick(MinecraftClient client, double fov) {
-        if (++tickCounter < INTERVAL_TICKS) return;
+        if (++tickCounter < Math.max(1, CameraModConfig.get().meteringIntervalTicks)) return;
         tickCounter = 0;
         if (client.player == null || client.world == null) {
             smoothedEV = 0.0;
@@ -55,6 +56,7 @@ public class Metering {
         } else {
             smoothedEV = smoothedEV * (1 - EMA_ALPHA) + raw * EMA_ALPHA;
         }
+        smoothedEV = Math.max(-8.0, Math.min(13.0, smoothedEV));
     }
 
     private static double computeSceneEV(MinecraftClient client, double fov) {
@@ -71,6 +73,10 @@ public class Metering {
         else if (timeOfDay < 13000L) daylightFactor = 1.0 - (timeOfDay - 12000L) / 1000.0;
         else if (timeOfDay < 22800L) daylightFactor = 0.0;
         else daylightFactor = (timeOfDay - 22800L) / 1200.0;
+
+        // Weather dims the sky light; block light (torches etc.) is unaffected.
+        double weather = world.isThundering() ? 0.6 : (world.isRaining() ? 0.75 : 1.0);
+        daylightFactor *= weather;
 
         for (int idx = 0; idx < GRID.length; idx++) {
             double[] pt = GRID[idx];
@@ -117,6 +123,29 @@ public class Metering {
         double sec = -v / 100.0;
         if (sec == (int) sec) return ((int) sec) + "s";
         return String.format("%.1fs", sec);
+    }
+
+    /**
+     * 佳能机顶液晶的快门表示：分数 {@code 1/80}，慢门 {@code 0"5}（0.5s）、
+     * {@code 2"}（整数秒）、{@code 3"5}（3.5s）。
+     */
+    public static String formatShutterCanon(int v) {
+        if (v > 1) return "1/" + v;
+        if (v == 1) return "1\"";
+        double sec = -v / 100.0;
+        if (sec < 1.0) {
+            int tenth = (int) Math.round(sec * 10);
+            return "0\"" + tenth;
+        }
+        if (sec == (int) sec) return ((int) sec) + "\"";
+        int whole = (int) sec;
+        int tenth = (int) Math.round((sec - whole) * 10);
+        return whole + "\"" + tenth;
+    }
+
+    /** 佳能机顶液晶的光圈表示：{@code F5.6}。 */
+    public static String formatAperture(float a) {
+        return a == (int) a ? "F" + (int) a : "F" + String.format("%.1f", a);
     }
 
     public static double cameraEV(float aperture, int shutterValue, int iso) {

@@ -1,20 +1,23 @@
 package com.example.camera;
 
-import item.Chuanganqi;
-import item.Jingtou;
-import item.Jishen;
+import com.example.camera.item.CameraBodyItem;
+import com.example.camera.item.LensItem;
+import com.example.camera.item.SensorItem;
 
 import net.minecraft.item.Item;
 import net.minecraft.registry.Registries;
 import net.minecraft.registry.Registry;
+import net.minecraft.util.Rarity;
 
 public class ModItems {
-    public static final Item HALF_FRAME_CMOS = new Chuanganqi(new Item.Settings().maxCount(16), false);
-    public static final Item FULL_FRAME_CMOS = new Chuanganqi(new Item.Settings().maxCount(16), true);
+    public static final Item HALF_FRAME_CMOS = new SensorItem(
+            new Item.Settings().maxCount(16).rarity(Rarity.UNCOMMON).fireproof(), false);
+    public static final Item FULL_FRAME_CMOS = new SensorItem(
+            new Item.Settings().maxCount(16).rarity(Rarity.RARE).fireproof(), true);
     // Lumin F = full-frame body, Lumin H = half-frame (APS-C) body.
-    public static final Item LUMIN_F = new Jishen(new Item.Settings().maxCount(1), true);
-    public static final Item LUMIN_H = new Jishen(new Item.Settings().maxCount(1), false);
-    public static final Item LENS    = new Jingtou(new Item.Settings().maxCount(1));
+    public static final Item LUMIN_F = new CameraBodyItem(new Item.Settings().maxCount(1), true);
+    public static final Item LUMIN_H = new CameraBodyItem(new Item.Settings().maxCount(1), false);
+    public static final Item LENS    = new LensItem(new Item.Settings().maxCount(1));
 
     public static void register() {
         reg("half_frame_cmos", HALF_FRAME_CMOS);

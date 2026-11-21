@@ -1,0 +1,11 @@
+{
+  "parent": "minecraft:recipes/root",
+  "criteria": {
+    "has_cmos": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": { "items": [ { "items": "camera-mod:half_frame_cmos" } ] }
+    }
+  },
+  "requirements": [["has_cmos"]],
+  "rewards": { "recipes": ["camera-mod:lumin_h"] }
+}

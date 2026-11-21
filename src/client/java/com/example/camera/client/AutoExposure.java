@@ -44,9 +44,9 @@ public class AutoExposure {
                 manualIso, fullFrame, manualAp, Integer.MIN_VALUE);
     }
 
-    public static AutoResult computeTv(double sceneEV, int manualShutter,
+    public static AutoResult computeTv(double sceneEV, int manualShutter, int focalLength,
                                        float maxAperture, int manualIso, boolean fullFrame) {
-        return solve(sceneEV, 50, maxAperture, manualShutter,
+        return solve(sceneEV, focalLength, maxAperture, manualShutter,
                 manualIso, fullFrame, 0f, manualShutter);
     }
 
@@ -139,6 +139,15 @@ public class AutoExposure {
     private static int snapISO(int v) {
         int best = ISO_STOPS[0];
         for (int x : ISO_STOPS) if (Math.abs(x - v) < Math.abs(best - v)) best = x;
+        return best;
+    }
+
+    /** Index of the entry closest to {@code value}; shared with the GUI steppers. */
+    public static int nearestIndex(int[] values, int value) {
+        int best = 0;
+        for (int i = 1; i < values.length; i++) {
+            if (Math.abs(values[i] - value) < Math.abs(values[best] - value)) best = i;
+        }
         return best;
     }
 

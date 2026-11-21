@@ -1,6 +1,6 @@
 package com.example.camera.client.render;
 
-import item.Jishen;
+import com.example.camera.item.CameraBodyItem;
 
 import com.example.camera.client.CameraModClient;
 
@@ -19,7 +19,10 @@ import software.bernie.geckolib.renderer.GeoItemRenderer;
  * <p>The 3D model comes from {@code geo/item/lumin.geo.json}; the lens bone is
  * hidden until a lens is stored in the camera's {@code Assembly} NBT.</p>
  */
-public class CameraItemRenderer extends GeoItemRenderer<Jishen> {
+public class CameraItemRenderer extends GeoItemRenderer<CameraBodyItem> {
+
+    /** 世界中（手持/展示框/掉落物）的模型放大系数：模型精致但偏小，GUI 保持原尺寸避免图标裁切。 */
+    private static final float WORLD_MODEL_SCALE = 1.18f;
 
     public CameraItemRenderer() {
         super(new LuminGeoModel());
@@ -36,18 +39,26 @@ public class CameraItemRenderer extends GeoItemRenderer<Jishen> {
         if (firstPerson && CameraModClient.isHandHidden()) {
             return;
         }
+
+        if (mode == ModelTransformationMode.GUI) {
+            super.render(stack, mode, matrices, vertexConsumers, light, overlay);
+            return;
+        }
+        matrices.push();
+        matrices.scale(WORLD_MODEL_SCALE, WORLD_MODEL_SCALE, WORLD_MODEL_SCALE);
         super.render(stack, mode, matrices, vertexConsumers, light, overlay);
+        matrices.pop();
     }
 
     @Override
-    public long getInstanceId(Jishen animatable) {
+    public long getInstanceId(CameraBodyItem animatable) {
         // Must match the item's instanceId so server-triggered animations reach
         // the same AnimatableManager the renderer reads.
         return animatable.instanceId();
     }
 
     @Override
-    public void preRender(MatrixStack poseStack, Jishen animatable, BakedGeoModel model,
+    public void preRender(MatrixStack poseStack, CameraBodyItem animatable, BakedGeoModel model,
                           VertexConsumerProvider bufferSource, VertexConsumer buffer,
                           boolean isReRender, float partialTick, int packedLight,
                           int packedOverlay, int colour) {
@@ -57,7 +68,7 @@ public class CameraItemRenderer extends GeoItemRenderer<Jishen> {
         if (isReRender) return;
 
         ItemStack stack = getCurrentItemStack();
-        boolean hasLens = stack != null && Jishen.hasLens(stack);
+        boolean hasLens = stack != null && CameraBodyItem.hasLens(stack);
         model.getBone("lens").ifPresent(bone -> bone.setHidden(!hasLens));
     }
 }

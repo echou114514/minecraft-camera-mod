@@ -1,15 +1,14 @@
 package com.example.camera.client;
 
-import com.example.camera.ModItems;
+import com.example.camera.client.optics.WbGains;
 import com.mojang.blaze3d.systems.RenderSystem;
-import item.Jishen;
+import com.example.camera.item.CameraBodyItem;
 
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.texture.NativeImage;
 import net.minecraft.client.texture.NativeImageBackedTexture;
 import net.minecraft.item.ItemStack;
-import net.minecraft.nbt.NbtCompound;
 import net.minecraft.util.Identifier;
 
 import java.util.Random;
@@ -22,20 +21,42 @@ public class PostProcess {
     private static int noiseH = 0;
     private static int chromaW = 0;
     private static int chromaH = 0;
+    /** Unscaled dimensions used to detect resizes (the texture dims are truncated). */
+    private static int scaledW0 = 0;
+    private static int scaledH0 = 0;
     private static boolean initialized = false;
     private static int frameCounter = 0;
 
     private static int currentWb = 5500;
     private static int currentSceneTemp = 5500;
     private static int currentIso = 100;
+    private static int currentTone = 0;
 
     public static void updateWhiteBalance(int wb, int sceneTemp) {
         currentWb = wb;
         currentSceneTemp = sceneTemp;
     }
 
+    public static void updateTone(int tone) {
+        currentTone = tone;
+    }
+
     public static void updateIso(int iso) {
         currentIso = iso;
+    }
+
+    private static void computeScaledSize(MinecraftClient client) {
+        scaledW0 = client.getWindow() != null ? client.getWindow().getScaledWidth() : 1920;
+        scaledH0 = client.getWindow() != null ? client.getWindow().getScaledHeight() : 1080;
+
+        noiseW = scaledW0;
+        noiseH = scaledH0;
+        long total = (long) noiseW * noiseH;
+        if (total > 4_000_000L) {
+            double scale = Math.sqrt(4_000_000.0 / total);
+            noiseW = (int) (noiseW * scale);
+            noiseH = (int) (noiseH * scale);
+        }
     }
 
     public static void initTextures() {
@@ -43,20 +64,8 @@ public class PostProcess {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client == null) return;
 
-        if (client.getWindow() != null) {
-            noiseW = client.getWindow().getScaledWidth();
-            noiseH = client.getWindow().getScaledHeight();
-        } else {
-            noiseW = 1920;
-            noiseH = 1080;
-        }
-
-        long total = (long) noiseW * noiseH;
-        if (total > 4_000_000L) {
-            double scale = Math.sqrt(4_000_000.0 / total);
-            noiseW = (int) (noiseW * scale);
-            noiseH = (int) (noiseH * scale);
-        }
+        computeScaledSize(client);
+        destroyTextures(client);
 
         lumaTextures = new Identifier[NOISE_FRAMES];
         chromaTextures = new Identifier[NOISE_FRAMES];
@@ -107,39 +116,56 @@ public class PostProcess {
         initialized = true;
     }
 
+    /** Frees the old noise textures before a rebuild so resizes do not leak GPU memory. */
+    private static void destroyTextures(MinecraftClient client) {
+        if (lumaTextures != null) {
+            for (Identifier id : lumaTextures) {
+                if (id != null) client.getTextureManager().destroyTexture(id);
+            }
+        }
+        if (chromaTextures != null) {
+            for (Identifier id : chromaTextures) {
+                if (id != null) client.getTextureManager().destroyTexture(id);
+            }
+        }
+        lumaTextures = null;
+        chromaTextures = null;
+    }
+
     public static void render(DrawContext ctx, MinecraftClient client) {
         if (client.player == null) return;
         ItemStack body = client.player.getMainHandStack();
-        if (!Jishen.isCamera(body)) return;
-
-        NbtCompound nbt = Jishen.getSettings(body);
-        int tone = nbt.getInt("tone");
+        if (!CameraBodyItem.isCamera(body) || !CameraBodyItem.hasLens(body)) return;
 
         int w = ctx.getScaledWindowWidth();
         int h = ctx.getScaledWindowHeight();
 
         renderWhiteBalance(ctx, w, h);
-        renderTone(ctx, w, h, tone);
+        renderTone(ctx, w, h, currentTone);
     }
 
     public static void renderNoise(DrawContext ctx, MinecraftClient client) {
         if (!initialized) initTextures();
         if (!initialized || client.player == null) return;
 
-        int curW = ctx.getScaledWindowWidth();
-        int curH = ctx.getScaledWindowHeight();
-        if (curW != noiseW || curH != noiseH) {
+        // Compare against the untruncated window size: noiseW/H are clamped to
+        // a 4M-pixel budget and would never equal the real size on 4K+,
+        // rebuilding 16 textures every single frame.
+        int curW = client.getWindow() != null ? client.getWindow().getScaledWidth() : 0;
+        int curH = client.getWindow() != null ? client.getWindow().getScaledHeight() : 0;
+        if (curW != scaledW0 || curH != scaledH0) {
+            computeScaledSize(client);
             initialized = false;
             initTextures();
             if (!initialized) return;
         }
 
         ItemStack body = client.player.getMainHandStack();
-        if (!Jishen.isCamera(body)) return;
-        if (!Jishen.hasLens(body)) return;
+        if (!CameraBodyItem.isCamera(body)) return;
+        if (!CameraBodyItem.hasLens(body)) return;
 
         int iso = currentIso;
-        boolean fullFrame = Jishen.isFullFrame(body);
+        boolean fullFrame = CameraBodyItem.isFullFrame(body);
         double luma = computeLumaNoise(iso, fullFrame);
         double chroma = computeChromaNoise(iso, fullFrame);
 
@@ -167,18 +193,18 @@ public class PostProcess {
     }
 
     private static void renderWhiteBalance(DrawContext ctx, int w, int h) {
-        int diff = currentWb - currentSceneTemp;
-        if (Math.abs(diff) < 600) return;
+        // Same gain math as the capture pipeline; the preview just approximates
+        // the per-channel gains with one warm/cool overlay.
+        float[] gains = WbGains.relativeGains(currentWb, currentSceneTemp);
+        float devR = Math.abs(gains[0] - 1f);
+        float devB = Math.abs(gains[2] - 1f);
+        float dev = Math.max(devR, devB);
+        if (dev < 0.02f) return;
 
-        if (diff > 0) {
-            double t = Math.min(1.0, (diff - 600) / 4400.0);
-            int a = (int) (t * 0.18 * 255);
-            ctx.fill(0, 0, w, h, (a << 24) | 0xFF8800);
-        } else {
-            double t = Math.min(1.0, (-diff - 600) / 2900.0);
-            int a = (int) (t * 0.18 * 255);
-            ctx.fill(0, 0, w, h, (a << 24) | 0x0088FF);
-        }
+        boolean warm = gains[0] > gains[2];
+        int a = (int) (Math.min(1f, dev * 1.5f) * 0.18f * 255);
+        if (a <= 0) return;
+        ctx.fill(0, 0, w, h, (a << 24) | (warm ? 0xFF8800 : 0x0088FF));
     }
 
     private static void renderTone(DrawContext ctx, int w, int h, int tone) {

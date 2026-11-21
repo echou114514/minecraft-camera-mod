@@ -1,7 +1,16 @@
-package data;
+package com.example.camera.data;
+
+import com.mojang.serialization.Codec;
+import com.mojang.serialization.codecs.RecordCodecBuilder;
 
 import net.minecraft.nbt.NbtCompound;
 
+/**
+ * Optical specification of a lens (focal range, aperture, autofocus).
+ *
+ * <p>Stored as a typed data component ({@link ModComponents#LENS_SPEC}); the
+ * NBT methods below only serve the legacy {@code CUSTOM_DATA} migration path.</p>
+ */
 public class LensSpec {
     public int focalLength;
     public int maxFocalLength;
@@ -9,6 +18,19 @@ public class LensSpec {
     public boolean isZoom;
     public boolean autoFocus;
     public float maxAperture;
+
+    public static final Codec<LensSpec> CODEC = RecordCodecBuilder.create(i -> i.group(
+            Codec.INT.fieldOf("focalLength").forGetter(s -> s.focalLength),
+            Codec.INT.fieldOf("maxFocalLength").forGetter(s -> s.maxFocalLength),
+            Codec.INT.fieldOf("baseFocalLength").forGetter(s -> s.baseFocalLength),
+            Codec.BOOL.fieldOf("isZoom").forGetter(s -> s.isZoom),
+            Codec.BOOL.fieldOf("autoFocus").forGetter(s -> s.autoFocus),
+            Codec.FLOAT.fieldOf("maxAperture").forGetter(s -> s.maxAperture)
+    ).apply(i, (f, m, b, z, a, ap) -> {
+        LensSpec s = new LensSpec(f, m, z, a, ap);
+        s.baseFocalLength = b;
+        return s.sanitize();
+    }));
 
     public static final int[] FOCAL_LENGTHS = {
             13, 20, 24, 28, 35, 40, 50, 70, 105, 135, 200, 400, 600, 800, 1200
@@ -34,6 +56,24 @@ public class LensSpec {
         return new LensSpec(13, 13, false, false, 1.8f);
     }
 
+    /** Clamps out-of-range fields so hand-edited or legacy data cannot yield f/0.0. */
+    public static LensSpec sanitize(LensSpec s) {
+        if (s.focalLength <= 0) s.focalLength = 13;
+        if (s.focalLength > 100000) s.focalLength = 100000;
+        if (s.maxFocalLength < s.focalLength) s.maxFocalLength = s.focalLength;
+        if (s.baseFocalLength <= 0 || (!s.isZoom && s.baseFocalLength != s.focalLength)) {
+            s.baseFocalLength = s.focalLength;
+        }
+        if (s.isZoom && s.baseFocalLength > s.focalLength) s.baseFocalLength = s.focalLength;
+        if (!(s.maxAperture > 0f) || Float.isNaN(s.maxAperture)) s.maxAperture = 1.8f;
+        s.maxAperture = Math.max(0.5f, Math.min(64f, s.maxAperture));
+        return s;
+    }
+
+    public LensSpec sanitize() {
+        return sanitize(this);
+    }
+
     public static LensSpec fromNbt(NbtCompound nbt) {
         LensSpec s = new LensSpec(
                 nbt.getInt("focalLength"),
@@ -49,12 +89,7 @@ public class LensSpec {
             s.baseFocalLength = s.focalLength;
         }
 
-        // 如果是变焦头，且广角端异常（大于当前焦距或小于等于0），强行拉回 13
-        if (s.isZoom && (s.baseFocalLength <= 0 || s.baseFocalLength > s.focalLength)) {
-            s.baseFocalLength = 13;
-        }
-
-        return s;
+        return s.sanitize();
     }
 
     public NbtCompound toNbt() {
