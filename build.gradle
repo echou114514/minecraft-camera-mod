@@ -1,10 +1,20 @@
 plugins {
     // 使用官方插件，确保 loom_version 在 gradle.properties 中定义且 >= 0.10
     id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
-    id 'maven-publish'
 }
 
 repositories {
+    // Fabric maven for fabric-api/loader artifacts. This loom variant only
+    // auto-adds it when `loom_fabric_repository` is set, so declare it here to
+    // keep the build self-contained on machines without mirror properties.
+    maven {
+        name = "Fabric"
+        url = "https://maven.fabricmc.net/"
+        content {
+            includeGroup("net.fabricmc")
+            includeGroup("net.fabricmc.fabric-api")
+        }
+    }
     // Fallback for the dev-client mods when dev-mods/ has no local copy.
     // Loom 会自动添加其余的 Maven 仓库。
     maven { url = "https://api.modrinth.com/maven" }
@@ -15,9 +25,50 @@ repositories {
             includeGroup("software.bernie.geckolib")
         }
     }
+    maven {
+        name = "TerraformersMC"
+        url = "https://maven.terraformersmc.com/releases/"
+        content {
+            includeGroup("com.terraformersmc")
+        }
+    }
 }
 
 def devModsCache = file("dev-mods")
+
+// ---------------------------------------------------------------------------
+// Automatic versioning. gradle.properties only pins `mod_version_base`; the
+// real version is derived from git:
+//   - tag build (v1.2.0)          -> 1.2.0
+//   - ordinary commit             -> <base>-dev.<commitCount>+<shortHash>
+//   - no git available            -> <base>
+// ---------------------------------------------------------------------------
+def derivedVersion = providers.gradleProperty("mod_version_base").orElse("0.0.0").get()
+try {
+    def refType = System.getenv("GITHUB_REF_TYPE")
+    def refName = System.getenv("GITHUB_REF_NAME")
+    if (refType == "tag" && refName != null && refName.startsWith("v")) {
+        derivedVersion = refName.substring(1)
+    } else {
+        def commitCount = providers.exec {
+            commandLine("git", "rev-list", "--count", "HEAD")
+        }.standardOutput.asText.get().trim()
+        def commitHash = providers.exec {
+            commandLine("git", "rev-parse", "--short", "HEAD")
+        }.standardOutput.asText.get().trim()
+        derivedVersion = "${derivedVersion}-dev.${commitCount}+${commitHash}"
+    }
+} catch (Exception ignored) {
+    // Not a git checkout (zip download, git missing, shallow CI clone) — keep base.
+}
+version = derivedVersion
+
+tasks.register("printVersion") {
+    description = "Prints the derived mod version (used by CI release workflows)."
+    doLast {
+        println project.version
+    }
+}
 
 loom {
     splitEnvironmentSourceSets()
@@ -39,6 +90,10 @@ dependencies {
     // 3D camera model + first-person assembly/shutter animations.
     modImplementation "software.bernie.geckolib:geckolib-fabric-${project.minecraft_version}:${project.geckolib_version}"
 
+    // Compile-only: the Mod Menu entrypoint is only loaded when Mod Menu is
+    // present, so the published jar ships the class without the dependency.
+    modCompileOnly "com.terraformersmc:modmenu:11.0.3"
+
     // Test-only runtime mods for `gradlew runClient`; they never reach the
     // published jar.
     //
@@ -51,20 +106,30 @@ dependencies {
     // Loom has to remap these jars (including Iris' mixin refmap), so they
     // cannot simply be dropped into run/mods. A local copy in dev-mods/ avoids
     // the slow Modrinth download.
-    if (providers.gradleProperty("withIrisDev").orNull == "true") {
+    // `-PwithIrisDev`（无值=空串）或 `-PwithIrisDev=true` 均可开启。
+    def irisDevFlag = providers.gradleProperty("withIrisDev").orNull
+    if (irisDevFlag == "true" || irisDevFlag == "") {
         [
-            ["iris-fabric-1.8.14-beta.1+mc1.21.1.jar",
-             "maven.modrinth:iris:1.8.14-beta.1+1.21.1-fabric"],
-            ["sodium-fabric-0.8.13-beta.1+mc1.21.1.jar",
-             "maven.modrinth:sodium:mc1.21.1-0.8.13-beta.1-fabric"],
+            ["iris-fabric-1.8.8+mc1.21.1.jar",
+             "maven.modrinth:iris:${project.dev_iris_version}"],
+            ["sodium-fabric-0.6.9+mc1.21.1.jar",
+             "maven.modrinth:sodium:${project.dev_sodium_version}"],
             ["DistantHorizons-3.3.3-1.21.1-fabric-neoforge.jar",
-             "maven.modrinth:distanthorizons:3.3.3-1.21.1"],
+             "maven.modrinth:distanthorizons:${project.dev_dh_version}"],
+            // Iris 的 JiJ 库依赖：Loom 不展开 files() 依赖的内嵌 jar，需手动带上。
+            // fabric-api-* 的内嵌模块由完整 fabric-api 覆盖，不用带。
+            ["antlr4-runtime-4.13.1.jar", null],
+            ["glsl-transformer-2.0.1.jar", null],
+            ["jcpp-1.4.14.jar", null],
         ].each { name, coordinate ->
             def cached = new File(devModsCache, name)
             if (cached.exists()) {
                 modRuntimeOnly files(cached)
-            } else {
+            } else if (coordinate != null) {
                 modRuntimeOnly coordinate
+            } else {
+                throw new GradleException(
+                    "dev-mods/${name} missing — extract it from the Iris jar's META-INF/jars")
             }
         }
     }
@@ -98,26 +163,22 @@ jar {
     }
 }
 
-publishing {
-    publications {
-        create("mavenJava", MavenPublication) {
-            from components.java
-        }
-    }
-    repositories {
-        // 发布仓库配置（如有需要）
-    }
-}
-
 loom {
     runs {
         client {
             programArgs "--username", "Dev"
             vmArg "-Xmx6G"
             vmArg "-Xms6G"
-            // Complementary Reimagined keeps the linear HDR scene in colortex0;
-            // Eclipse uses colortex5 (the compiled default).
-            vmArg "-Dcameramod.irisHdrTarget=0"
+            // HDR 目标由 AUTO 自动检测（解析光影包 final 程序的 colortex 采样），
+            // Complementary=colortex3 / Eclipse=colortex5 均覆盖；需要手动时用
+            // -Dcameramod.irisHdrTarget=N 覆盖。
+            // Unattended test harness: `./gradlew runClient -PautoTest=true
+            // -PautoTestExports=2` creates/reuses a test world and captures
+            // everything automatically.
+            if (providers.gradleProperty("autoTest").orNull != null) {
+                vmArg "-Dcameramod.autoTest=${providers.gradleProperty('autoTest').get()}"
+                vmArg "-Dcameramod.autoTest.exports=${providers.gradleProperty('autoTestExports').orElse('6').get()}"
+            }
         }
     }
 }
@@ -129,7 +190,7 @@ loom {
 // `run/` and `dev-mods/` are gitignored.
 // ---------------------------------------------------------------------------
 def devShaderpackName = "ComplementaryReimagined_r5.9.3.zip"
-def devShaderpackUrl = "https://cdn.modrinth.com/data/HVnmMxH1/versions/Bqen1mJX/ComplementaryReimagined_r5.9.3.zip"
+def devShaderpackUrl = project.dev_shaderpack_url
 
 tasks.register("prepareDevRun") {
     description = "Stages the test shader pack and preselects it for `runClient`."

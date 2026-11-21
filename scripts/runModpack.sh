@@ -37,7 +37,12 @@ fi
 
 mods_dir="$MP_PATH/mods"
 mkdir -p -- "$mods_dir"
+
+# Remove every other camera-mod jar first: version bumps would otherwise leave
+# two copies of the mod in the pack.
+find "$mods_dir" -maxdepth 1 -type f -name 'camera-mod-*.jar' ! -name '*-sources.jar' -delete
 install -m 0644 -- "${jars[0]}" "$mods_dir/$(basename -- "${jars[0]}")"
 
 echo "Installed $(basename -- "${jars[0]}") into $mods_dir"
-exec bash "$MP_RUNNER" "$@" > /tmp/latest.log 2>&1
+echo "Launching modpack (output is also written to /tmp/latest.log)..."
+exec bash "$MP_RUNNER" "$@" 2>&1 | tee /tmp/latest.log

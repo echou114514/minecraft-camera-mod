@@ -1,0 +1,73 @@
+name: release
+
+# Commit -> build -> publish:
+#   - push to main/master  -> refreshes the rolling "Dev Snapshot" prerelease
+#   - push a tag `vX.Y.Z`  -> publishes a stable release named by the tag
+# The jar version is derived from git automatically (see build.gradle):
+# tag builds use the tag, commits build as `<base>-dev.<count>+<hash>`.
+on:
+  push:
+    branches: [main, master]
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v6
+        with:
+          # Full history so `git rev-list --count` produces real dev versions.
+          fetch-depth: 0
+      - name: setup jdk
+        uses: actions/setup-java@v5
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+      - name: setup gradle (cached)
+        uses: gradle/actions/setup-gradle@v4
+      - name: build
+        run: ./gradlew build
+      - name: read derived version
+        id: version
+        run: echo "version=$(./gradlew -q printVersion)" >> "$GITHUB_OUTPUT"
+
+      # Keep the rolling snapshot tidy: one release, one jar, always newest.
+      - name: delete previous dev snapshot
+        if: github.ref_type != 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete dev --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+
+      - name: publish stable release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          make_latest: true
+          files: |
+            build/libs/camera-mod-*.jar
+            !build/libs/*-sources.jar
+
+      - name: publish dev snapshot
+        if: github.ref_type != 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev
+          name: Dev Snapshot
+          body: |
+            自动构建：提交 ${{ github.sha }}（${{ github.ref_name }}）
+            版本：`${{ steps.version.outputs.version }}`
+          prerelease: true
+          files: |
+            build/libs/camera-mod-*.jar
+            !build/libs/*-sources.jar
