@@ -1,17 +1,22 @@
 package com.example.camera.client.metering;
 
 public enum MeteringMode {
-    EVALUATIVE("评价测光", 1.00),
-    CENTER_WEIGHTED("中央重点", 0.55),
-    PARTIAL("局部测光", 0.30),
-    SPOT("点测光", 0.12);
+    EVALUATIVE("hud.camera-mod.metering.evaluative", 1.00),
+    CENTER_WEIGHTED("hud.camera-mod.metering.center", 0.55),
+    PARTIAL("hud.camera-mod.metering.partial", 0.30),
+    SPOT("hud.camera-mod.metering.spot", 0.12);
 
-    public final String displayName;
+    /** Translation key of the display name. */
+    public final String nameKey;
     public final double spread;
 
-    MeteringMode(String displayName, double spread) {
-        this.displayName = displayName;
+    MeteringMode(String nameKey, double spread) {
+        this.nameKey = nameKey;
         this.spread = spread;
+    }
+
+    public String displayName() {
+        return net.minecraft.text.Text.translatable(nameKey).getString();
     }
 
     public MeteringMode next() {

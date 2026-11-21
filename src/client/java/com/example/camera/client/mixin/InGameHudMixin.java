@@ -1,6 +1,7 @@
 package com.example.camera.client.mixin;
 
 import com.example.camera.client.CameraModClient;
+import com.example.camera.client.config.CameraModConfig;
 
 import net.minecraft.client.gui.hud.InGameHud;
 
@@ -15,21 +16,27 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  *
  * <p>We must not cancel {@code InGameHud.render} itself: Fabric's
  * {@code HudRenderCallback} is invoked at its TAIL, which is where the camera
- * HUD is drawn.</p>
+ * HUD is drawn. Both injections honour {@code hideVanillaHud} in the config so
+ * HUD-mod users can keep their overlays.</p>
  */
 @Mixin(InGameHud.class)
 public class InGameHudMixin {
 
+    private boolean cameraMod$shouldHide() {
+        return CameraModConfig.get().hideVanillaHud && CameraModClient.isViewfinderActive();
+    }
+
     @Inject(method = "renderMainHud", at = @At("HEAD"), cancellable = true)
     private void cameraMod$hideMainHud(CallbackInfo ci) {
-        if (CameraModClient.isViewfinderActive()) {
+        if (cameraMod$shouldHide()) {
             ci.cancel();
         }
     }
 
-    @Inject(method = "renderCrosshair", at = @At("HEAD"), cancellable = true)
+    // Purely cosmetic: never hard-crash if another mod changes renderCrosshair.
+    @Inject(method = "renderCrosshair", at = @At("HEAD"), require = 0, cancellable = true)
     private void cameraMod$hideCrosshair(CallbackInfo ci) {
-        if (CameraModClient.isViewfinderActive()) {
+        if (cameraMod$shouldHide()) {
             ci.cancel();
         }
     }

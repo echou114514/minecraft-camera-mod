@@ -1,6 +1,9 @@
 package com.example.camera.client;
 
+import com.example.camera.CameraMod;
+import com.example.camera.client.config.CameraModConfig;
 import com.example.camera.client.dof.DepthOfField;
+import com.example.camera.client.optics.WbGains;
 import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gl.Framebuffer;
@@ -10,13 +13,14 @@ import net.minecraft.text.MutableText;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 import org.lwjgl.BufferUtils;
-import org.lwjgl.opengl.GL11;
 
 import java.io.File;
-import java.lang.reflect.Field;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.stream.IntStream;
 
 public class HighResCapture {
@@ -56,11 +60,17 @@ public class HighResCapture {
     public static String snapshotCamName = "";
     public static String snapshotDateStr = "";
 
-    public static float cameraNear = 0.05f;
-    public static float cameraFar = 512f;
+    /**
+     * Actual projection near/far planes, refreshed from the live perspective
+     * matrix by {@code GameRendererMixin}. The vanilla far plane depends on the
+     * render distance, so hardcoded values would skew every depth-to-distance
+     * conversion (and with it the whole DoF model).
+     */
+    public static volatile float cameraNear = 0.05f;
+    public static volatile float cameraFar = 512f;
 
     private enum State { IDLE, WAITING, CAPTURING }
-    private static State state = State.IDLE;
+    private static volatile State state = State.IDLE;
     private static int waitFrames = 0;
     private static int restoreWidth;
     private static int restoreHeight;
@@ -73,10 +83,15 @@ public class HighResCapture {
     private static boolean depthCaptured;
     private static boolean linearScene = true;
     private static int captureAttempts;
-    private static boolean restoreRenderHand = true;
-    private static Field renderHandField;
+    private static boolean ldrFallbackWarned;
     /** True while the CPU post-processing worker owns the cached buffers. */
     private static volatile boolean processing;
+
+    private static final ExecutorService WORKER = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "camera-mod-capture");
+        t.setDaemon(true);
+        return t;
+    });
 
     /**
      * Number of frames to let the world render at full resolution before the
@@ -86,7 +101,14 @@ public class HighResCapture {
      * history to wash out without making the shutter feel slow.
      */
     private static int settleFrames() {
-        return Math.max(1, Integer.getInteger("cameramod.settleFrames", 4));
+        String prop = System.getProperty("cameramod.settleFrames");
+        if (prop != null) {
+            try {
+                return Math.max(1, Integer.parseInt(prop));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return Math.max(1, CameraModConfig.get().settleFrames);
     }
 
     public static boolean isCapturing() { return state == State.CAPTURING; }
@@ -97,6 +119,22 @@ public class HighResCapture {
         boolean completed = captureCompleted;
         captureCompleted = false;
         return completed;
+    }
+
+    /**
+     * Recovers the perspective near/far planes from the matrix delivered to
+     * {@code GameRenderer.loadProjectionMatrix}. For a standard perspective
+     * matrix: far = m23 / (m22 + 1), near = m23 / (m22 - 1). Zoom transforms
+     * only touch the x/y rows, so this stays valid while zoomed.
+     */
+    public static void updateProjection(float m22, float m23) {
+        if (Math.abs(m22 - 1f) < 1e-4f || Math.abs(m22 + 1f) < 1e-4f) return;
+        float near = m23 / (m22 - 1f);
+        float far = m23 / (m22 + 1f);
+        if (Float.isFinite(near) && Float.isFinite(far) && near > 0f && far > near) {
+            cameraNear = near;
+            cameraFar = far;
+        }
     }
 
     public static boolean request(MinecraftClient client) {
@@ -118,7 +156,7 @@ public class HighResCapture {
             window.setFramebufferHeight(FULL_H);
             restoreHudHidden = client.options.hudHidden;
             client.options.hudHidden = true;
-            hideHeldItem(client);
+            HandVisibility.hideDuringCapture(client);
             client.onResolutionChanged();
 
             Framebuffer framebuffer = client.getFramebuffer();
@@ -132,7 +170,7 @@ public class HighResCapture {
         } catch (Throwable t) {
             state = State.IDLE;
             restorePending = true;
-            System.err.println("[CameraMod] 高分辨率目标创建失败，取消拍摄: " + t);
+            CameraMod.LOGGER.error("[CameraMod] 高分辨率目标创建失败，取消拍摄", t);
             return false;
         }
     }
@@ -156,12 +194,13 @@ public class HighResCapture {
         if (!IrisHdrSource.readColor(source, cachedColorBuf)) return;
         hdrCaptured = true;
         linearScene = true;
+        IrisHdrSource.maybeDumpTargets(finalPassRenderer);   // 一键穷举检测（-Dcameramod.targetDump）
 
         cachedDepthBuf.clear();
         depthCaptured = IrisHdrSource.readDepth(source, cachedDepthBuf);
-        System.out.println("[CameraMod] Iris HDR: colortex" + source.target
-                + (depthCaptured ? " + depth" : " 深度不可用(" + IrisHdrSource.lastStatus() + ")")
-                + " " + source.width + "x" + source.height);
+        CameraMod.LOGGER.info("[CameraMod] Iris HDR: colortex{} {} {}x{}",
+                source.target, depthCaptured ? "+ depth" : "深度不可用(" + IrisHdrSource.lastStatus() + ")",
+                source.width, source.height);
     }
 
     public static void afterFrame(MinecraftClient client) {
@@ -203,8 +242,10 @@ public class HighResCapture {
             cachedPixelBuffer.clear();
 
             if (!hdrCaptured) {
-                if (IrisHdrSource.configuredTarget() >= 0 && IrisHdrSource.isAvailable()) {
-                    System.out.println("[CameraMod] Iris HDR 未就绪，回退到主目标");
+                if (IrisHdrSource.configuredTarget() >= 0 && IrisHdrSource.isAvailable() && !ldrFallbackWarned) {
+                    ldrFallbackWarned = true;
+                    CameraMod.LOGGER.warn("[CameraMod] Iris HDR 目标未就绪，本次及后续拍摄回退到主目标 (LDR)。"
+                            + "可在 config/camera-mod.json 调整 irisHdrTarget。");
                 }
                 readMainTarget(client, fb);
             }
@@ -212,14 +253,9 @@ public class HighResCapture {
                 cachedDepthBuf.clear();
                 depthCaptured = GlReadback.readDepthFloat(fb.fbo, FULL_W, FULL_H, cachedDepthBuf)
                         && GlReadback.hasDepthVariation(cachedDepthBuf);
-                System.out.println("[CameraMod] 主目标深度: " + (depthCaptured ? "可读" : "无效或读取失败"));
-            }
-            if (depthCaptured) {
-                System.out.println("[CameraMod] " + describeDepth(cachedDepthBuf));
             }
         } catch (Throwable t) {
-            System.err.println("[CameraMod] 像素读取失败: " + t.getMessage());
-            t.printStackTrace();
+            CameraMod.LOGGER.error("[CameraMod] 像素读取失败，取消拍摄", t);
             state = State.IDLE;
             waitFrames = 0;
             restorePending = true;
@@ -240,14 +276,11 @@ public class HighResCapture {
         hdrCaptured = false;
         depthCaptured = false;
 
-        Thread worker = new Thread(() -> cameraMod$processCapture(captureClient, captureDepth, captureLinear),
-                "camera-mod-capture");
-        worker.setDaemon(true);
-        worker.start();
+        WORKER.execute(() -> processCapture(captureClient, captureDepth, captureLinear));
     }
 
     /** CPU-only 8K post-processing, safe to run off the render thread. */
-    private static void cameraMod$processCapture(MinecraftClient client, boolean hasDepth, boolean linear) {
+    private static void processCapture(MinecraftClient client, boolean hasDepth, boolean linear) {
         try {
             long dofStart = System.currentTimeMillis();
             if (hasDepth) {
@@ -256,39 +289,73 @@ public class HighResCapture {
             } else {
                 copyColor(cachedColorBuf, cachedDofBuf);
             }
-            System.out.println("[CameraMod] 景深耗时: " + (System.currentTimeMillis() - dofStart) + "ms");
+            CameraMod.LOGGER.info("[CameraMod] 景深耗时: {}ms", System.currentTimeMillis() - dofStart);
 
             processToDisplay(cachedDofBuf, cachedPixelBuffer, linear);
             cachedPixelBuffer.position(0);
 
             File dir = new File(client.runDirectory, "screenshots");
             dir.mkdirs();
-            String name = "camera_20mp_" + System.currentTimeMillis() + ".tiff";
+            int megapixels = Math.round(FULL_W * (float) FULL_H / 1_000_000f);
+            String name = CameraModConfig.get().filenamePrefix + megapixels + "mp_"
+                    + System.currentTimeMillis() + ".tiff";
             File file = new File(dir, name);
+
+            long requiredBytes = (long) FULL_W * FULL_H * 12L + 1_000_000L;
+            long usable = file.getUsableSpace();
+            // statfs 在部分环境（btrfs 大块分配期）会瞬时把 f_bavail 报成 0；
+            // usable==0 时视为「不可信」，降级为警告放行——真正写满时文件通道
+            // 自己会抛 ENOSPC 并走统一的失败提示。(0, required) 才是真实低空间。
+            if (usable == 0L) {
+                CameraMod.LOGGER.warn("[CameraMod] statfs 报告剩余空间为 0（不可信），跳过预检: {} total={}MB",
+                        file.getAbsolutePath(), file.getTotalSpace() >> 20);
+            } else if (usable < requiredBytes) {
+                Thread.sleep(3_000);
+                usable = file.getUsableSpace();
+                if (usable > 0L && usable < requiredBytes) {
+                    throw new IOException(String.format("磁盘空间不足: 需要 %d MB，剩余 %d MB (path=%s exists=%s)",
+                            requiredBytes >> 20, usable >> 20,
+                            file.getAbsolutePath(), file.exists()));
+                }
+            }
 
             TiffWriter.writeRgb32fBuffer(file, cachedPixelBuffer, FULL_W, FULL_H,
                     snapshotIso, snapshotShutter, snapshotAperture, snapshotFocalLength, snapshotExposureEV,
                     snapshotWb, snapshotMeteringMode, snapshotExposureProgram, snapshotExposureMode,
                     snapshotWbAuto, snapshotLensName, snapshotCamName, snapshotDateStr);
 
-            System.out.println("[CameraMod] 已保存: " + file.getAbsolutePath());
+            CameraMod.LOGGER.info("[CameraMod] 已保存: {}", file.getAbsolutePath());
             client.execute(() -> {
                 if (client.player != null) {
-                    client.player.sendMessage(cameraMod$fileMessage(file, name), false);
+                    client.player.sendMessage(fileMessage(file, name, megapixels), false);
                 }
             });
-            System.gc();
         } catch (Throwable t) {
-            System.err.println("[CameraMod] 保存失败: " + t.getMessage());
-            t.printStackTrace();
+            CameraMod.LOGGER.error("[CameraMod] 保存失败", t);
             client.execute(() -> {
                 if (client.player != null) {
-                    client.player.sendMessage(Text.literal("§c[相机] 保存失败: " + t.getMessage()), false);
+                    client.player.sendMessage(Text.translatable("message.camera-mod.capture_failed",
+                            t.getMessage() == null ? t.toString() : t.getMessage())
+                            .formatted(Formatting.RED), false);
                 }
             });
         } finally {
+            releaseBuffers();
             processing = false;
         }
+    }
+
+    /**
+     * Frees the ~800MB of direct capture buffers after a shot. They are
+     * re-allocated on demand by the next capture, so idle clients do not sit
+     * on a huge chunk of off-heap memory forever.
+     */
+    private static void releaseBuffers() {
+        cachedColorBuf = null;
+        cachedDepthBuf = null;
+        cachedDofBuf = null;
+        cachedPixelBuffer = null;
+        cachedLdrBuffer = null;
     }
 
     /**
@@ -296,40 +363,27 @@ public class HighResCapture {
      * clickable and opens the TIFF with the system's default viewer, matching
      * how vanilla reports screenshots.
      */
-    private static Text cameraMod$fileMessage(File file, String name) {
+    private static Text fileMessage(File file, String name, int megapixels) {
         MutableText link = Text.literal(name).styled(style -> style
                 .withColor(Formatting.AQUA)
                 .withUnderline(true)
                 .withClickEvent(new ClickEvent(ClickEvent.Action.OPEN_FILE, file.getAbsolutePath()))
                 .withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT,
                         Text.literal(file.getAbsolutePath()))));
-        return Text.literal("[相机] 20MP TIFF · screenshots/ ").append(link);
+        return Text.translatable("message.camera-mod.capture_ready", megapixels).append(link);
     }
 
-    private static String describeDepth(FloatBuffer depth) {
-        float min = Float.MAX_VALUE;
-        float max = -Float.MAX_VALUE;
-        int nonFar = 0;
-        int samples = 0;
-        for (int i = 0; i < depth.capacity(); i += 4096) {
-            float v = depth.get(i);
-            if (!Float.isFinite(v)) continue;
-            min = Math.min(min, v);
-            max = Math.max(max, v);
-            if (v < 0.999999f) nonFar++;
-            samples++;
-        }
-        if (samples == 0) return "深度缓冲为空";
-        return String.format("深度范围 %.4f..%.4f, 非远平面采样 %d/%d", min, max, nonFar, samples);
-    }
-
-    private static void readMainTarget(MinecraftClient client, Framebuffer fb) {
+    private static void readMainTarget(MinecraftClient client, Framebuffer fb) throws IOException {
         linearScene = false;
         if (cachedLdrBuffer == null) {
             cachedLdrBuffer = BufferUtils.createByteBuffer(FULL_W * FULL_H * 4);
         }
         cachedLdrBuffer.clear();
-        if (!GlReadback.readRgbaBytes(fb.fbo, FULL_W, FULL_H, cachedLdrBuffer)) return;
+        if (!GlReadback.readRgbaBytes(fb.fbo, FULL_W, FULL_H, cachedLdrBuffer)) {
+            // Never continue with whatever is left in the buffer from a
+            // previous shot: abort this capture instead.
+            throw new IOException("主目标像素读取失败");
+        }
 
         IntStream.range(0, FULL_H).parallel().forEach(y -> {
             for (int x = 0; x < FULL_W; x++) {
@@ -369,21 +423,22 @@ public class HighResCapture {
             double key = logAverageLuma(src);
             double base = MIDDLE_GRAY / Math.max(key, 1e-6);
             exposure *= (float) Math.min(1e6, base);
-            System.out.printf("[CameraMod] 曝光: key=%.4f base=%.4f meterEV=%.2f evComp=%.2f total=%.2f stops%n",
-                    key, base, snapshotMeterEV, snapshotExposureEV, totalStops);
+            CameraMod.LOGGER.info("[CameraMod] 曝光: key={} base={} meterEV={} evComp={} total={} stops",
+                    String.format("%.4f", key), String.format("%.4f", base),
+                    String.format("%.2f", snapshotMeterEV), String.format("%.2f", snapshotExposureEV),
+                    String.format("%.2f", totalStops));
         } else {
             exposure = (float) Math.pow(2, clamp(totalStops, -5f, 5f));
         }
 
-        float wbT = clamp((snapshotWb - snapshotSceneTemp) / 5500f, -1f, 1f);
-        float rGain = 1f + 0.25f * wbT;
-        float gGain = 1f;
-        float bGain = 1f - 0.25f * wbT;
+        // Sensor white balance relative to the actual scene light: the ratio of
+        // the two CCT curves, not a hand-tuned ±0.25 linear tilt.
+        float[] wbGain = WbGains.relativeGains(snapshotWb, snapshotSceneTemp);
 
         float toneT = clamp(snapshotTone / 4f, -1f, 1f);
-        rGain *= 1f + 0.08f * toneT;
-        gGain *= 1f - 0.08f * toneT;
-        bGain *= 1f + 0.08f * toneT;
+        float toneR = 1f + 0.08f * toneT;
+        float toneG = 1f - 0.08f * toneT;
+        float toneB = 1f + 0.08f * toneT;
 
         double noiseSigma = PostProcess.computeLumaNoise(snapshotIso, snapshotFullFrame);
         double chromaSigma = PostProcess.computeChromaNoise(snapshotIso, snapshotFullFrame);
@@ -391,11 +446,14 @@ public class HighResCapture {
         boolean addChroma = chromaSigma > 0.0001;
 
         final float exp = exposure;
-        final float rg = rGain;
-        final float gg = gGain;
-        final float bg = bGain;
+        final float rg = wbGain[0] * toneR;
+        final float gg = wbGain[1] * toneG;
+        final float bg = wbGain[2] * toneB;
         final float ns = (float) noiseSigma;
         final float cs = (float) chromaSigma;
+        // Read-noise floor: independent of signal, so deep shadows keep their
+        // grain at high ISO instead of going perfectly clean.
+        final float noiseFloor = 0.15f * ns;
 
         IntStream.range(0, FULL_H).parallel().forEach(y -> {
             int srcY = FULL_H - 1 - y;
@@ -413,7 +471,7 @@ public class HighResCapture {
                 if (addNoise) {
                     float luma = 0.2126f * r + 0.7152f * g + 0.0722f * b;
                     if (luma < 0) luma = 0;
-                    float n = hashNoise(x, y) * 2f * ns * luma;
+                    float n = (luma + noiseFloor) * hashNoise(x, y) * 2f * ns;
                     r += n;
                     g += n;
                     b += n;
@@ -425,7 +483,7 @@ public class HighResCapture {
                         int by = (y / 3) * 3 + 29;
                         float cr = hashNoise(bx, by);
                         float cb = hashNoise(bx + 71, by + 53);
-                        float amp = cs * luma;
+                        float amp = cs * (luma + noiseFloor);
                         r += cr * amp;
                         g -= (cr + cb) * 0.5f * amp;
                         b += cb * amp;
@@ -522,37 +580,16 @@ public class HighResCapture {
         }
     }
 
-    private static void hideHeldItem(MinecraftClient client) {
-        try {
-            if (renderHandField == null) {
-                renderHandField = client.gameRenderer.getClass().getDeclaredField("renderHand");
-                renderHandField.setAccessible(true);
-            }
-            restoreRenderHand = renderHandField.getBoolean(client.gameRenderer);
-        } catch (Throwable ignored) {
-            restoreRenderHand = true;
-        }
-        client.gameRenderer.setRenderHand(false);
-    }
-
-    private static void restoreHeldItem(MinecraftClient client) {
-        try {
-            client.gameRenderer.setRenderHand(restoreRenderHand);
-        } catch (Throwable t) {
-            System.err.println("[CameraMod] 恢复手持物品渲染失败: " + t);
-        }
-    }
-
     private static void restoreResolution(MinecraftClient client) {
         if (!resolutionChanged) return;
         try {
             client.getWindow().setFramebufferWidth(restoreWidth);
             client.getWindow().setFramebufferHeight(restoreHeight);
             client.options.hudHidden = restoreHudHidden;
-            restoreHeldItem(client);
+            HandVisibility.restoreAfterCapture(client);
             client.onResolutionChanged();
         } catch (Throwable t) {
-            System.err.println("[CameraMod] 恢复窗口渲染尺寸失败: " + t);
+            CameraMod.LOGGER.error("[CameraMod] 恢复窗口渲染尺寸失败", t);
         } finally {
             resolutionChanged = false;
             restorePending = false;
@@ -619,7 +656,9 @@ public class HighResCapture {
                 float b = src.get(i4+2);
                 float wSum = 1f;
 
-                int samples = radius < 4f ? 8 : (radius < 16f ? 12 : 16);
+                // Sample count grows with the blur radius so large bokeh disks
+                // are not undersampled into visible noise.
+                int samples = radius < 4f ? 8 : (radius < 16f ? 16 : (radius < 48f ? 24 : 32));
                 for (int s = 0; s < samples; s++) {
                     float t = (s + 0.5f) / samples;
                     float sr = radius * (float) Math.sqrt(t);

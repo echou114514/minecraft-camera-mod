@@ -8,65 +8,11 @@ import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 
+/**
+ * Minimal little-endian TIFF writer producing 32-bit float RGB with a main
+ * IFD plus an EXIF SubIFD carrying the capture parameters.
+ */
 public class TiffWriter {
-
-    public static void writeRgb16(File file, short[] rgb16, int w, int h) throws IOException {
-        int dataSize = w * h * 3 * 2;
-        int entries = 12;
-        int ifdSize = 2 + entries * 12 + 4;
-        long ifdOffset = 8;
-        long dataOffset = ifdOffset + ifdSize;
-        long bpsOffset = dataOffset + dataSize;
-        long sfOffset = bpsOffset + 6;
-
-        try (FileOutputStream fos = new FileOutputStream(file);
-             FileChannel ch = fos.getChannel()) {
-
-            ByteBuffer header = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
-            header.put((byte) 'I').put((byte) 'I').putShort((short) 42).putInt((int) ifdOffset);
-            header.flip();
-            ch.write(header);
-
-            ByteBuffer ifd = ByteBuffer.allocate(ifdSize).order(ByteOrder.LITTLE_ENDIAN);
-            ifd.putShort((short) entries);
-            putEntry(ifd, 256, 3, 1, w);
-            putEntry(ifd, 257, 3, 1, h);
-            putEntry(ifd, 258, 3, 3, bpsOffset);
-            putEntry(ifd, 259, 3, 1, 1);
-            putEntry(ifd, 262, 3, 1, 2);
-            putEntry(ifd, 273, 4, 1, dataOffset);
-            putEntry(ifd, 277, 3, 1, 3);
-            putEntry(ifd, 278, 3, 1, h);
-            putEntry(ifd, 279, 4, 1, dataSize);
-            putEntry(ifd, 282, 5, 1, 0);
-            putEntry(ifd, 283, 5, 1, 0);
-            putEntry(ifd, 339, 3, 3, sfOffset);
-            ifd.putInt(0);
-            ifd.flip();
-            ch.write(ifd);
-
-            ByteBuffer data = ByteBuffer.allocate(dataSize).order(ByteOrder.LITTLE_ENDIAN);
-            for (int i = 0; i < w * h; i++) {
-                data.putShort(rgb16[i * 3]);
-                data.putShort(rgb16[i * 3 + 1]);
-                data.putShort(rgb16[i * 3 + 2]);
-            }
-            data.flip();
-            ch.write(data);
-
-            ByteBuffer bps = ByteBuffer.allocate(6).order(ByteOrder.LITTLE_ENDIAN);
-            bps.putShort((short) 16).putShort((short) 16).putShort((short) 16);
-            bps.flip();
-            ch.position(bpsOffset);
-            ch.write(bps);
-
-            ByteBuffer sf = ByteBuffer.allocate(6).order(ByteOrder.LITTLE_ENDIAN);
-            sf.putShort((short) 1).putShort((short) 1).putShort((short) 1);
-            sf.flip();
-            ch.position(sfOffset);
-            ch.write(sf);
-        }
-    }
 
     public static void writeRgb32fBuffer(File file, ByteBuffer rgbData, int w, int h,
                                          int iso, int shutter, float aperture, float focal, float ev,
@@ -76,9 +22,10 @@ public class TiffWriter {
         byte[] modelBytes = padEven(cameraModel.getBytes(StandardCharsets.US_ASCII));
         byte[] dateBytes = padEven(dateStr.getBytes(StandardCharsets.US_ASCII));
         byte[] lensBytes = padEven(lensModel.getBytes(StandardCharsets.US_ASCII));
+        byte[] softwareBytes = padEven("MC Camera Mod".getBytes(StandardCharsets.US_ASCII));
 
         int dataSize = w * h * 3 * 4;
-        int ifd0Entries = 14;
+        int ifd0Entries = 15;
         int ifd0Size = 2 + ifd0Entries * 12 + 4;
         int exifEntries = 13;
         int exifSize = 2 + exifEntries * 12 + 4;
@@ -97,7 +44,8 @@ public class TiffWriter {
         long makeOffset = dateOffset + dateBytes.length;
         long modelOffset = makeOffset + makeBytes.length;
         long lensOffset = modelOffset + modelBytes.length;
-        long pixelOffset = lensOffset + lensBytes.length;
+        long softwareOffset = lensOffset + lensBytes.length;
+        long pixelOffset = softwareOffset + softwareBytes.length;
 
         try (FileOutputStream fos = new FileOutputStream(file);
              FileChannel ch = fos.getChannel()) {
@@ -120,6 +68,7 @@ public class TiffWriter {
             putEntry(ifd0, 277, 3, 1, 3);
             putEntry(ifd0, 278, 4, 1, h);
             putEntry(ifd0, 279, 4, 1, dataSize);
+            putEntry(ifd0, 305, 2, softwareBytes.length, softwareOffset);
             putEntry(ifd0, 306, 2, dateBytes.length, dateOffset);
             putEntry(ifd0, 339, 3, 3, sfOffset);
             putEntry(ifd0, 34665, 4, 1, exifIfdOffset);
@@ -170,6 +119,7 @@ public class TiffWriter {
             ch.position(makeOffset); ch.write(ByteBuffer.wrap(makeBytes));
             ch.position(modelOffset); ch.write(ByteBuffer.wrap(modelBytes));
             ch.position(lensOffset); ch.write(ByteBuffer.wrap(lensBytes));
+            ch.position(softwareOffset); ch.write(ByteBuffer.wrap(softwareBytes));
 
             ch.position(pixelOffset);
             ch.write(rgbData);

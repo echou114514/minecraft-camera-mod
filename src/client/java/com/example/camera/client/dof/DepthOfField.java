@@ -10,10 +10,11 @@ package com.example.camera.client.dof;
 public final class DepthOfField {
     private DepthOfField() {}
 
-    /** 1 个 Minecraft 方块对应多少毫米。可由 -Dcameramod.mmPerBlock 覆盖。 */
-    public static final float mmPerBlock = readMmPerBlock();
-
-    private static float readMmPerBlock() {
+    /**
+     * 1 个 Minecraft 方块对应多少毫米。优先读 config/camera-mod.json，
+     * JVM 属性 {@code -Dcameramod.mmPerBlock} 显式设置时仍可覆盖。
+     */
+    public static float mmPerBlock() {
         String v = System.getProperty("cameramod.mmPerBlock");
         if (v != null) {
             try {
@@ -22,10 +23,11 @@ public final class DepthOfField {
                     return parsed;
                 }
             } catch (NumberFormatException ignored) {
-                // fall through to the default
+                // fall through to the config
             }
         }
-        return 375f;
+        float cfg = com.example.camera.client.config.CameraModConfig.get().mmPerBlock;
+        return cfg > 1f && cfg < 100000f ? cfg : 375f;
     }
 
     /**
@@ -53,7 +55,7 @@ public final class DepthOfField {
 
         float f = focalLengthMm;
         float n = aperture;
-        float s2 = objectDistance * mmPerBlock;
+        float s2 = objectDistance * mmPerBlock();
 
         float cocMm;
         boolean infiniteFocus = Float.isInfinite(focusDistance) || focusDistance > 10000f;
@@ -61,7 +63,7 @@ public final class DepthOfField {
             // 对焦在无穷远：coc = f² / (N · S2)
             cocMm = (f * f) / (n * s2);
         } else {
-            float s1 = focusDistance * mmPerBlock;
+            float s1 = focusDistance * mmPerBlock();
             float denom = s2 * n * (s1 - f);
             if (Math.abs(denom) < 1e-4f) {
                 return 0f;
@@ -75,7 +77,7 @@ public final class DepthOfField {
         cocMm = (float) Math.sqrt(cocMm * cocMm + airyMm * airyMm);
 
         float cocPixels = (cocMm / sensorHeightMm) * imageHeightPx;
-        float signed = (infiniteFocus || s2 >= focusDistance * mmPerBlock) ? cocPixels : -cocPixels;
+        float signed = (infiniteFocus || s2 >= focusDistance * mmPerBlock()) ? cocPixels : -cocPixels;
         return signed;
     }
 
