@@ -1,0 +1,15 @@
+{
+  "parent": "minecraft:recipes/root",
+  "criteria": {
+    "has_painting": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": { "items": [ { "items": "minecraft:painting" } ] }
+    },
+    "has_redstone_block": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": { "items": [ { "items": "minecraft:redstone_block" } ] }
+    }
+  },
+  "requirements": [["has_painting", "has_redstone_block"]],
+  "rewards": { "recipes": ["camera-mod:half_frame_cmos"] }
+}

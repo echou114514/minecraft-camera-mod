@@ -1,9 +1,9 @@
-package recipe;
+package com.example.camera.recipe;
 
 import com.example.camera.ModItems;
 import com.example.camera.ModRecipes;
-import data.LensSpec;
-import item.Jingtou;
+import com.example.camera.data.LensSpec;
+import com.example.camera.item.LensItem;
 
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
@@ -15,6 +15,12 @@ import net.minecraft.registry.RegistryWrapper;
 import net.minecraft.world.World;
 
 public class LensUpgradeRecipe extends SpecialCraftingRecipe {
+    /** Material caps so one crafting grid cannot skip a dozen stops at once. */
+    private static final int MAX_GLASS = 4;
+    private static final int MAX_REDSTONE = 3;
+    private static final int MAX_IRON_INGOT = 4;
+    private static final int MAX_IRON_BLOCK = 2;
+
     public LensUpgradeRecipe(CraftingRecipeCategory category) {
         super(category);
     }
@@ -31,17 +37,17 @@ public class LensUpgradeRecipe extends SpecialCraftingRecipe {
             if (s.isOf(ModItems.LENS)) {
                 if (!lens.isEmpty()) return false;
                 lens = s;
-            } else if (s.isOf(Items.GLASS)) glass++;
-            else if (s.isOf(Items.REDSTONE)) redstone++;
-            else if (s.isOf(Items.IRON_INGOT)) ironIngot++;
-            else if (s.isOf(Items.IRON_BLOCK)) ironBlock++;
+            } else if (s.isOf(Items.GLASS)) glass += s.getCount();
+            else if (s.isOf(Items.REDSTONE)) redstone += s.getCount();
+            else if (s.isOf(Items.IRON_INGOT)) ironIngot += s.getCount();
+            else if (s.isOf(Items.IRON_BLOCK)) ironBlock += s.getCount();
             else return false;
         }
 
         if (lens.isEmpty()) return false;
         if (glass == 0 && redstone == 0 && ironIngot == 0 && ironBlock == 0) return false;
-        if (redstone > 3) return false;
-        return true;
+        return glass <= MAX_GLASS && redstone <= MAX_REDSTONE
+                && ironIngot <= MAX_IRON_INGOT && ironBlock <= MAX_IRON_BLOCK;
     }
 
     @Override
@@ -54,15 +60,15 @@ public class LensUpgradeRecipe extends SpecialCraftingRecipe {
             ItemStack s = stacks.get(i);
             if (s.isEmpty()) continue;
             if (s.isOf(ModItems.LENS)) lens = s;
-            else if (s.isOf(Items.GLASS)) glass++;
-            else if (s.isOf(Items.REDSTONE)) redstone++;
-            else if (s.isOf(Items.IRON_INGOT)) ironIngot++;
-            else if (s.isOf(Items.IRON_BLOCK)) ironBlock++;
+            else if (s.isOf(Items.GLASS)) glass += s.getCount();
+            else if (s.isOf(Items.REDSTONE)) redstone += s.getCount();
+            else if (s.isOf(Items.IRON_INGOT)) ironIngot += s.getCount();
+            else if (s.isOf(Items.IRON_BLOCK)) ironBlock += s.getCount();
         }
 
         if (lens.isEmpty()) return ItemStack.EMPTY;
 
-        LensSpec spec = Jingtou.getSpec(lens).copy();
+        LensSpec spec = LensItem.getSpec(lens).copy();
 
         // 焦距处理
         if (glass > 0) {
@@ -81,20 +87,19 @@ public class LensUpgradeRecipe extends SpecialCraftingRecipe {
             }
         }
 
-        // 红石
-        if (redstone == 1) {
+        // 红石：1 个解锁自动对焦，2 个及以上同时解锁自动对焦 + 变焦。
+        if (redstone >= 1) {
             spec.autoFocus = true;
-        } else if (redstone >= 2) {
-            if (redstone == 3) spec.autoFocus = true;
-
+        }
+        if (redstone >= 2) {
             if (!spec.isZoom) {
                 // 定焦变焦：广角端就是此刻的定焦焦距！
                 spec.isZoom = true;
                 spec.baseFocalLength = spec.focalLength;
             }
 
-            // 更新上限
-            spec.maxFocalLength = Math.max(spec.baseFocalLength, spec.focalLength);
+            // 更新上限：保留已升级出的长焦端，绝不能抹回广角端。
+            spec.maxFocalLength = Math.max(spec.maxFocalLength, spec.focalLength);
             int cap = (int) (spec.baseFocalLength * 4.5f);
             if (spec.maxFocalLength > cap) {
                 spec.maxFocalLength = LensSpec.maxFocalWithin(spec.baseFocalLength, 4.5f);
@@ -112,8 +117,10 @@ public class LensUpgradeRecipe extends SpecialCraftingRecipe {
             spec.maxAperture = limit;
         }
 
-        ItemStack out = new ItemStack(ModItems.LENS);
-        Jingtou.setSpec(out, spec);
+        // Copy the original stack so custom names and other components survive.
+        ItemStack out = lens.copy();
+        out.setCount(1);
+        LensItem.setSpec(out, spec);
         return out;
     }
 

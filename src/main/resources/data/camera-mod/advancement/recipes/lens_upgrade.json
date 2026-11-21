@@ -1,0 +1,11 @@
+{
+  "parent": "minecraft:recipes/root",
+  "criteria": {
+    "has_lens": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": { "items": [ { "items": "camera-mod:lens" } ] }
+    }
+  },
+  "requirements": [["has_lens"]],
+  "rewards": { "recipes": ["camera-mod:lens_upgrade"] }
+}

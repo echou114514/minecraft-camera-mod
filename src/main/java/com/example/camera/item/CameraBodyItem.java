@@ -1,10 +1,13 @@
-package item;
+package com.example.camera.item;
 
 import java.util.List;
+import java.util.Optional;
 
 import com.example.camera.ModItems;
-
-import data.LensSpec;
+import com.example.camera.data.CameraData;
+import com.example.camera.data.CameraSettings;
+import com.example.camera.data.LensSpec;
+import com.example.camera.data.ModComponents;
 
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.component.type.NbtComponent;
@@ -31,9 +34,10 @@ import software.bernie.geckolib.util.GeckoLibUtil;
 /**
  * A Lumin camera body. The sensor is built into the body (Lumin F is
  * full-frame, Lumin H is half-frame); only the lens is user-swappable and it
- * is stored in the stack's custom data so the whole camera stays one slot.
+ * is stored in the body's typed data component so the whole camera stays one
+ * slot. Sneak-use with an empty offhand removes the lens again.
  */
-public class Jishen extends Item implements GeoItem {
+public class CameraBodyItem extends Item implements GeoItem {
     public static final String ANIM_CONTROLLER = "main";
     public static final String ANIM_SHUTTER = "shutter";
     public static final String ANIM_INSTALL_LENS = "install_lens";
@@ -51,13 +55,19 @@ public class Jishen extends Item implements GeoItem {
     private static final RawAnimation SHUTTER_ANIM = RawAnimation.begin().thenPlay(ANIM_SHUTTER);
     private static final RawAnimation INSTALL_LENS_ANIM = RawAnimation.begin().thenPlay(ANIM_INSTALL_LENS);
 
+    /** GeckoLib keys synced animation data per class; registering twice would silently overwrite. */
+    private static boolean syncedAnimatableRegistered = false;
+
     private final AnimatableInstanceCache cache = GeckoLibUtil.createInstanceCache(this);
     private final boolean fullFrame;
 
-    public Jishen(Settings settings, boolean fullFrame) {
+    public CameraBodyItem(Settings settings, boolean fullFrame) {
         super(settings);
         this.fullFrame = fullFrame;
-        SingletonGeoAnimatable.registerSyncedAnimatable(this);
+        if (!syncedAnimatableRegistered) {
+            syncedAnimatableRegistered = true;
+            SingletonGeoAnimatable.registerSyncedAnimatable(this);
+        }
     }
 
     /** Full-frame bodies are Lumin F, half-frame (APS-C) bodies are Lumin H. */
@@ -87,26 +97,18 @@ public class Jishen extends Item implements GeoItem {
 
     /** Plays a triggerable animation locally (used for the shutter key). */
     public static void playAnimation(ItemStack stack, String animation) {
-        if (!(stack.getItem() instanceof Jishen camera)) return;
+        if (!(stack.getItem() instanceof CameraBodyItem camera)) return;
         camera.getAnimatableInstanceCache()
                 .getManagerForId(camera.instanceId())
                 .tryTriggerAnimation(ANIM_CONTROLLER, animation);
     }
 
     // ------------------------------------------------------------------
-    // NBT helpers
+    // Typed data component + legacy CUSTOM_DATA migration
     // ------------------------------------------------------------------
 
     public static NbtCompound defaultSettings() {
-        NbtCompound nbt = new NbtCompound();
-        nbt.putInt("iso", 100);
-        nbt.putInt("shutter", 125);
-        nbt.putFloat("aperture", 5.6f);
-        nbt.putInt("wb", 5500);
-        nbt.putInt("tone", 0);
-        nbt.putFloat("focus", 10.0f);
-        nbt.putBoolean("evAuto", true);
-        return nbt;
+        return CameraData.DEFAULT.toFlatNbt();
     }
 
     /**
@@ -117,13 +119,36 @@ public class Jishen extends Item implements GeoItem {
         return !settings.contains("evAuto") || settings.getBoolean("evAuto");
     }
 
-    private static NbtCompound rootCopy(ItemStack stack) {
+    private static NbtCompound legacyRoot(ItemStack stack) {
         NbtComponent comp = stack.get(DataComponentTypes.CUSTOM_DATA);
         return comp == null ? new NbtCompound() : comp.copyNbt();
     }
 
-    private static void writeRoot(ItemStack stack, NbtCompound root) {
-        stack.set(DataComponentTypes.CUSTOM_DATA, NbtComponent.of(root));
+    /** Reads the typed component, transparently migrating legacy CUSTOM_DATA stacks. */
+    public static CameraData getData(ItemStack stack) {
+        CameraData data = stack.get(ModComponents.CAMERA_DATA);
+        if (data != null) return data;
+
+        NbtCompound root = legacyRoot(stack);
+        if (root.isEmpty()) return CameraData.DEFAULT;
+
+        NbtCompound settings = root.contains("Settings")
+                ? root.getCompound("Settings").copy()
+                : defaultSettings();
+        CameraData migrated = CameraData.fromFlatNbt(settings, CameraData.DEFAULT);
+        if (root.contains("Assembly")) {
+            NbtCompound assembly = root.getCompound("Assembly");
+            if (assembly.contains("Lens")) {
+                migrated = migrated.withLens(LensSpec.fromNbt(assembly.getCompound("Lens")));
+            }
+        }
+        return migrated;
+    }
+
+    private static void setData(ItemStack stack, CameraData data) {
+        stack.set(ModComponents.CAMERA_DATA, data);
+        // The typed component supersedes the opaque blob; drop it to keep items clean.
+        stack.remove(DataComponentTypes.CUSTOM_DATA);
     }
 
     /** True for any Lumin body (full or half frame). */
@@ -132,21 +157,18 @@ public class Jishen extends Item implements GeoItem {
     }
 
     public static NbtCompound getSettings(ItemStack stack) {
-        NbtCompound root = rootCopy(stack);
-        if (!root.contains("Settings")) return defaultSettings();
-        return root.getCompound("Settings").copy();
+        return getData(stack).toFlatNbt();
     }
 
     public static void setSettings(ItemStack stack, NbtCompound settings) {
-        // Preserve the assembly data; settings are changed far more often.
-        NbtCompound root = rootCopy(stack);
-        root.put("Settings", settings);
-        writeRoot(stack, root);
+        // Merge on top of the current data so untouched keys (e.g. hudMode,
+        // assembly) survive partial writes.
+        CameraData next = CameraData.fromFlatNbt(settings, getData(stack));
+        setData(stack, next);
     }
 
     public static boolean hasLens(ItemStack stack) {
-        NbtCompound root = rootCopy(stack);
-        return root.contains("Assembly") && root.getCompound("Assembly").contains("Lens");
+        return getData(stack).hasLens();
     }
 
     /** The sensor is part of the body, so any Lumin body always has one. */
@@ -159,28 +181,19 @@ public class Jishen extends Item implements GeoItem {
     }
 
     public static LensSpec getLensSpec(ItemStack stack) {
-        NbtCompound root = rootCopy(stack);
-        if (root.contains("Assembly")) {
-            NbtCompound assembly = root.getCompound("Assembly");
-            if (assembly.contains("Lens")) {
-                return LensSpec.fromNbt(assembly.getCompound("Lens"));
-            }
-        }
-        return LensSpec.base();
+        return getData(stack).lens().orElseGet(LensSpec::base);
     }
 
     public static void setLensSpec(ItemStack stack, LensSpec spec) {
-        NbtCompound root = rootCopy(stack);
-        NbtCompound assembly = root.contains("Assembly")
-                ? root.getCompound("Assembly").copy()
-                : new NbtCompound();
-        assembly.put("Lens", spec.toNbt());
-        root.put("Assembly", assembly);
-        writeRoot(stack, root);
+        setData(stack, getData(stack).withLens(spec));
+    }
+
+    public static void removeLens(ItemStack stack) {
+        setData(stack, getData(stack).withLens(null));
     }
 
     public static boolean isFullFrame(ItemStack stack) {
-        return stack.getItem() instanceof Jishen camera ? camera.isFullFrame() : true;
+        return stack.getItem() instanceof CameraBodyItem camera ? camera.isFullFrame() : true;
     }
 
     public static float getSensorHeight(ItemStack stack) {
@@ -188,7 +201,7 @@ public class Jishen extends Item implements GeoItem {
     }
 
     public static void installLens(ItemStack camera, ItemStack lens) {
-        setLensSpec(camera, Jingtou.getSpec(lens).copy());
+        setLensSpec(camera, LensItem.getSpec(lens).copy());
     }
 
     /** Returns the animation to play when {@code offhand} can be installed, or null. */
@@ -219,14 +232,32 @@ public class Jishen extends Item implements GeoItem {
             } else {
                 installLens(camera, offhand);
                 offhand.decrement(1);
-                user.sendMessage(Text.literal("§a[相机] 已安装镜头："
-                        + lensLabel(Jingtou.getSpec(camera))), true);
+                // Broadcast the animation so other players see the install too.
+                triggerAnim(user, instanceId(), ANIM_CONTROLLER, action);
+                user.sendMessage(Text.translatable("message.camera-mod.lens_installed",
+                        lensLabel(getLensSpec(camera))).formatted(Formatting.GREEN), true);
             }
             return TypedActionResult.success(camera);
         }
 
+        if (user.isSneaking() && hasLens(camera)) {
+            if (world.isClient()) {
+                return TypedActionResult.success(camera);
+            }
+            // Remove the lens and hand it back with its full spec preserved.
+            LensSpec spec = getLensSpec(camera);
+            ItemStack lens = new ItemStack(ModItems.LENS);
+            LensItem.setSpec(lens, spec);
+            removeLens(camera);
+            user.getInventory().offerOrDrop(lens);
+            user.sendMessage(Text.translatable("message.camera-mod.lens_removed")
+                    .formatted(Formatting.YELLOW), true);
+            return TypedActionResult.success(camera);
+        }
+
         if (world.isClient() && !isReady(camera)) {
-            user.sendMessage(Text.literal("§e[相机] 副手拿镜头，右键安装"), true);
+            user.sendMessage(Text.translatable("message.camera-mod.install_hint")
+                    .formatted(Formatting.YELLOW), true);
         }
         return TypedActionResult.pass(camera);
     }
@@ -240,7 +271,8 @@ public class Jishen extends Item implements GeoItem {
     @Override
     public void appendTooltip(ItemStack stack, TooltipContext context, List<Text> tooltip, TooltipType type) {
         boolean full = isFullFrame(stack);
-        tooltip.add(Text.literal("Lumin " + (full ? "F · 全画幅" : "H · 半画幅"))
+        tooltip.add(Text.translatable(full
+                        ? "item.camera-mod.body.fullframe" : "item.camera-mod.body.halfframe")
                 .formatted(full ? Formatting.GOLD : Formatting.AQUA));
 
         if (hasLens(stack)) {
@@ -248,16 +280,21 @@ public class Jishen extends Item implements GeoItem {
             String focal = spec.isZoom
                     ? spec.baseFocalLength + "-" + spec.maxFocalLength + "mm"
                     : spec.focalLength + "mm";
-            tooltip.add(Text.literal("镜头: " + focal + "  f/" + spec.maxAperture)
-                    .formatted(Formatting.GRAY));
+            tooltip.add(Text.translatable("item.camera-mod.body.lens_installed", focal
+                    + "  f/" + spec.maxAperture).formatted(Formatting.GRAY));
         } else {
-            tooltip.add(Text.literal("镜头: 未安装").formatted(Formatting.DARK_GRAY));
+            tooltip.add(Text.translatable("item.camera-mod.body.lens_none")
+                    .formatted(Formatting.DARK_GRAY));
         }
 
         if (isReady(stack)) {
-            tooltip.add(Text.literal("右键打开参数面板").formatted(Formatting.GREEN));
+            tooltip.add(Text.translatable("item.camera-mod.body.open_panel_hint")
+                    .formatted(Formatting.GREEN));
+            tooltip.add(Text.translatable("item.camera-mod.body.remove_hint")
+                    .formatted(Formatting.DARK_GRAY));
         } else {
-            tooltip.add(Text.literal("副手拿镜头右键安装").formatted(Formatting.YELLOW));
+            tooltip.add(Text.translatable("item.camera-mod.body.install_hint")
+                    .formatted(Formatting.YELLOW));
         }
     }
 }

@@ -1,9 +1,20 @@
 {
   "type": "minecraft:crafting_shaped",
-  "pattern": ["P", "R"],
+  "pattern": [
+    "P",
+    "R"
+  ],
   "key": {
-    "P": { "item": "minecraft:painting" },
-    "R": { "item": "minecraft:redstone_block" }
+    "P": {
+      "item": "minecraft:painting"
+    },
+    "R": {
+      "item": "minecraft:redstone_block"
+    }
   },
-  "result": { "id": "camera-mod:half_frame_cmos", "count": 1 }
+  "result": {
+    "id": "camera-mod:half_frame_cmos",
+    "count": 1
+  },
+  "category": "misc"
 }

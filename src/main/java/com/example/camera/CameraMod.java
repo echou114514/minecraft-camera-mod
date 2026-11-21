@@ -1,5 +1,7 @@
 package com.example.camera;
 
+import com.example.camera.data.ModComponents;
+
 import net.fabricmc.api.ModInitializer;
 
 import net.minecraft.util.Identifier;
@@ -17,10 +19,12 @@ public class CameraMod implements ModInitializer {
 
 	@Override
 	public void onInitialize() {
+		// Components must exist before items with default components load.
+		ModComponents.register();
 		ModItems.register();
 		ModItemGroups.register();
 		ModRecipes.register();
-		LOGGER.info("[CameraMod] 相机模组加载成功！");
+		LOGGER.info("[CameraMod] loaded");
 	}
 
 	public static Identifier id(String path) {

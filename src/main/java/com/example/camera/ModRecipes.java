@@ -1,10 +1,11 @@
 package com.example.camera;
 
+import com.example.camera.recipe.LensUpgradeRecipe;
+
 import net.minecraft.recipe.RecipeSerializer;
 import net.minecraft.recipe.SpecialRecipeSerializer;
 import net.minecraft.registry.Registries;
 import net.minecraft.registry.Registry;
-import recipe.LensUpgradeRecipe;
 
 public class ModRecipes {
     public static final RecipeSerializer<LensUpgradeRecipe> LENS_UPGRADE_SERIALIZER =
