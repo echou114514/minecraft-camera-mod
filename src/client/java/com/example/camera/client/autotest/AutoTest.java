@@ -554,24 +554,28 @@ public final class AutoTest {
             stepIndex++;
             return;
         }
-        if (stepIndex == 3 || stepIndex == 4) {
-            String style = stepIndex == 3 ? "Neon" : "Classic";
-            CameraModConfig.get().uiStyle = style;
+        if (stepIndex == 3) {
+            CameraModConfig.get().uiStyle = "Neon";
             stepWait = 10;
             stepIndex++;
             return;
         }
-        if (stepIndex == 5) {
+        if (stepIndex == 4) {
             takeShot(client, "hud_neon_" + comboTag);
             CameraModConfig.get().uiStyle = "Classic";
             stepWait = 10;
             stepIndex++;
             return;
         }
-        if (stepIndex == 6) {
+        if (stepIndex == 5) {
             takeShot(client, "hud_classic_" + comboTag);
             CameraModConfig.get().uiStyle = "Neon";
             stepWait = 10;
+            stepIndex++;
+            return;
+        }
+        if (stepIndex == 6) {
+            // 步骤 5 已把 uiStyle 复位为 Neon，此步仅占位，再进入导出档位。
             stepIndex++;
             return;
         }

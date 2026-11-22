@@ -86,6 +86,8 @@ public class HighResCapture {
     private static boolean ldrFallbackWarned;
     /** True while the CPU post-processing worker owns the cached buffers. */
     private static volatile boolean processing;
+    /** 8K 帧缓冲是否已完全重建（避免在 onResolutionChanged 后首帧读取拉伸/部分内容）。 */
+    private static boolean ready8k;
 
     private static final ExecutorService WORKER = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "camera-mod-capture");
@@ -165,6 +167,7 @@ public class HighResCapture {
                 return false;
             }
             state = State.WAITING;
+            ready8k = false;   // 8K target 刚重建，需等一帧确认尺寸真正就绪
             waitFrames = settleFrames();
             return true;
         } catch (Throwable t) {
@@ -220,6 +223,13 @@ public class HighResCapture {
             restorePending = true;
             return;
         }
+        // 确认 8K target 已完全重建，避免首帧读取尚未就绪的（拉伸/部分）内容，
+        // 导致导出图出现远景重复/延伸/缩小伪影。
+        if (!ready8k) {
+            ready8k = true;
+            return;
+        }
+        ready8k = false;
 
         // Iris resizes its own targets on the frame after the window changed.
         // Give the HDR source a couple of extra frames before falling back to
@@ -666,7 +676,8 @@ public class HighResCapture {
                     int sx = x + Math.round((float) (Math.cos(st) * sr));
                     int sy = y + Math.round((float) (Math.sin(st) * sr));
 
-                    if (sx < 0 || sx >= w || sy < 0 || sy >= h) continue;
+                    if (sx < 0) sx = 0; if (sx >= w) sx = w - 1;
+                    if (sy < 0) sy = 0; if (sy >= h) sy = h - 1;
                     int si = sy * w + sx;
                     int si4 = si * 4;
 

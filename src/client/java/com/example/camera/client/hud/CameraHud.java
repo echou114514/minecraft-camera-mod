@@ -131,14 +131,16 @@ public final class CameraHud {
         m.push();
         m.scale(ui, ui, 1f);
 
-        // 先画模式附加效果（作用于世界之上、HUD 之下），再画 HUD 本体。
-        HudEffects.render(ctx, client, s, scaledW, scaledH);
         renderTopBar(ctx, client, s, dw);
         renderModes(ctx, client, s, dw, dh);
         renderParams(ctx, client, s, dw, dh);
         renderHint(ctx, client, s, dw, dh);
 
         m.pop();
+
+        // 模式附加效果作用于未缩放的 GUI 像素空间，不可放在 0.45 缩放矩阵内，
+        // 否则全屏暗角/径向渐变会只覆盖左上 0.45×0.45 区域，导致 UI 位置错位。
+        HudEffects.render(ctx, client, s, scaledW, scaledH);
     }
 
     /**
