@@ -59,11 +59,11 @@ public final class ExrWriter {
         hdr.put((byte) 0);                                   // header 结束
 
         int headerSize = hdr.position();
-        long offsetTableSize = (long) h * 8;
+        int offsetTableSize = h * 8;
         long pixelStart = headerSize + offsetTableSize;
 
-        // ---- 文件骨架：header + offset table ----
-        ByteBuffer out = ByteBuffer.allocate(headerSize).order(ByteOrder.LITTLE_ENDIAN);
+        // ---- 文件骨架：header + offset table（缓冲必须容纳两者）----
+        ByteBuffer out = ByteBuffer.allocate(headerSize + offsetTableSize).order(ByteOrder.LITTLE_ENDIAN);
         out.put((ByteBuffer) hdr.flip());
         for (int y = 0; y < h; y++) {
             out.putLong(pixelStart + (long) y * (8 + lineBytes));
