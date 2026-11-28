@@ -35,8 +35,10 @@ public final class CameraModConfig {
      * Iris path entirely, 0-15 = manual override.
      */
     public int irisHdrTarget = -100;
-    /** Prefix for saved TIFF files. */
+    /** Prefix for saved files. */
     public String filenamePrefix = "camera_";
+    /** Export format: "TIFF" (32-bit float, display-referred), "EXR" (linear HDR + Z), "DNG" (LinearRaw 16-bit + DepthMap). */
+    public String exportFormat = "TIFF";
 
     public boolean isClassicUi() {
         return "Classic".equalsIgnoreCase(uiStyle);

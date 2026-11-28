@@ -24,6 +24,7 @@ public class CameraModConfigScreen extends Screen {
     private ButtonWidget settleButton;
     private ButtonWidget mmButton;
     private ButtonWidget targetButton;
+    private ButtonWidget formatButton;
 
     public CameraModConfigScreen(Screen parent) {
         super(Text.translatable("config.camera-mod.title"));
@@ -78,6 +79,16 @@ public class CameraModConfigScreen extends Screen {
                     cfg.save();
                 }).dimensions(x, y += spacing, w, 20).build());
 
+        formatButton = addDrawableChild(ButtonWidget
+                .builder(label("config.camera-mod.exportFormat", cfg.exportFormat), b -> {
+                    cfg.exportFormat = switch (cfg.exportFormat) {
+                        case "TIFF" -> "EXR";
+                        case "EXR" -> "DNG";
+                        default -> "TIFF";
+                    };
+                    cfg.save();
+                }).dimensions(x, y += spacing, w, 20).build());
+
         addDrawableChild(ButtonWidget
                 .builder(Text.translatable("gui.done"), b -> close())
                 .dimensions(x, y + spacing + 10, w, 20).build());
@@ -129,6 +140,7 @@ public class CameraModConfigScreen extends Screen {
         settleButton.setMessage(label("config.camera-mod.settleFrames", String.valueOf(cfg.settleFrames)));
         mmButton.setMessage(label("config.camera-mod.mmPerBlock", formatMm(cfg.mmPerBlock)));
         targetButton.setMessage(label("config.camera-mod.irisHdrTarget", targetText()));
+        formatButton.setMessage(label("config.camera-mod.exportFormat", cfg.exportFormat));
     }
 
     @Override

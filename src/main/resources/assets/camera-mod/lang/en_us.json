@@ -68,5 +68,6 @@
   "key.camera-mod.param_next": "Next parameter",
   "key.camera-mod.value_down": "Decrease value",
   "key.camera-mod.value_up": "Increase value",
-  "category.camera-mod": "Camera Mod"
+  "category.camera-mod": "Camera Mod",
+  "config.camera-mod.exportFormat": "Export format (TIFF/EXR/DNG)"
 }

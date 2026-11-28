@@ -2,6 +2,8 @@ package com.example.camera.client;
 
 import com.example.camera.CameraMod;
 import com.example.camera.client.config.CameraModConfig;
+import com.example.camera.client.io.DngWriter;
+import com.example.camera.client.io.ExrWriter;
 import com.example.camera.client.dof.DepthOfField;
 import com.example.camera.client.optics.WbGains;
 import com.mojang.blaze3d.systems.RenderSystem;
@@ -50,6 +52,7 @@ public class HighResCapture {
     private static FloatBuffer cachedDepthBuf = null;
     private static FloatBuffer cachedDofBuf = null;
     private static ByteBuffer cachedPixelBuffer = null;
+    private static FloatBuffer cachedLinearDepth = null;   // 线性化深度（方块/米）
     private static ByteBuffer cachedLdrBuffer = null;
 
     public static float snapshotExposureEV = 0f;
@@ -325,26 +328,32 @@ public class HighResCapture {
     /** CPU-only 8K post-processing, safe to run off the render thread. */
     private static void processCapture(MinecraftClient client, boolean hasDepth, boolean linear) {
         try {
+            String format = CameraModConfig.get().exportFormat.toUpperCase(java.util.Locale.ROOT);
             long dofStart = System.currentTimeMillis();
             if (hasDepth) {
-                applyDepthOfField(cachedColorBuf, cachedDepthBuf, cachedDofBuf, FULL_W, FULL_H,
+                applyDepthOfField(cachedColorBuf, cachedDepthBuf, cachedDofBuf, cachedLinearDepth, FULL_W, FULL_H,
                         snapshotFocusDistance, snapshotFocalLength, snapshotAperture, cameraNear, cameraFar);
             } else {
                 copyColor(cachedColorBuf, cachedDofBuf);
+                parallelFor(0, FULL_H, y -> {
+                    for (int x = 0; x < FULL_W; x++) cachedLinearDepth.put(y * FULL_W + x, cameraFar);
+                });
             }
             CameraMod.LOGGER.info("[CameraMod] 景深耗时: {}ms", System.currentTimeMillis() - dofStart);
 
-            processToDisplay(cachedDofBuf, cachedPixelBuffer, linear);
-            cachedPixelBuffer.position(0);
+            // 线性域管线：曝光 + 白平衡 + 色调 + 噪点（原地），三种格式共用。
+            applyLinearPipeline(cachedDofBuf, linear);
 
             File dir = new File(client.runDirectory, "screenshots");
             dir.mkdirs();
             int megapixels = Math.round(FULL_W * (float) FULL_H / 1_000_000f);
+            String ext = switch (format) { case "EXR" -> ".exr"; case "DNG" -> ".dng"; default -> ".tiff"; };
             String name = CameraModConfig.get().filenamePrefix + megapixels + "mp_"
-                    + System.currentTimeMillis() + ".tiff";
+                    + System.currentTimeMillis() + ext;
             File file = new File(dir, name);
 
-            long requiredBytes = (long) FULL_W * FULL_H * 12L + 1_000_000L;
+            long bytesPerPx = switch (format) { case "EXR" -> 8L; case "DNG" -> 8L; default -> 12L; };
+            long requiredBytes = (long) FULL_W * FULL_H * bytesPerPx + 1_000_000L;
             long usable = file.getUsableSpace();
             // statfs 在部分环境（btrfs 大块分配期）会瞬时把 f_bavail 报成 0；
             // usable==0 时视为「不可信」，降级为警告放行——真正写满时文件通道
@@ -362,10 +371,36 @@ public class HighResCapture {
                 }
             }
 
-            TiffWriter.writeRgb32fBuffer(file, cachedPixelBuffer, FULL_W, FULL_H,
-                    snapshotIso, snapshotShutter, snapshotAperture, snapshotFocalLength, snapshotExposureEV,
-                    snapshotWb, snapshotMeteringMode, snapshotExposureProgram, snapshotExposureMode,
-                    snapshotWbAuto, snapshotLensName, snapshotCamName, snapshotDateStr);
+            switch (format) {
+                case "EXR" -> {
+                    java.util.Map<String, String> meta = new java.util.LinkedHashMap<>();
+                    meta.put("camera", snapshotCamName);
+                    meta.put("lens", snapshotLensName);
+                    meta.put("software", "MC Camera Mod");
+                    meta.put("iso", String.valueOf(snapshotIso));
+                    meta.put("shutter", snapshotShutter > 0 ? "1/" + snapshotShutter : (-snapshotShutter / 100.0) + "s");
+                    meta.put("aperture", "f/" + snapshotAperture);
+                    meta.put("exposureEV", String.valueOf(snapshotExposureEV));
+                    meta.put("depthUnits", "blocks (meters)");
+                    meta.put("depthNear", String.valueOf(cameraNear));
+                    meta.put("depthFar", String.valueOf(cameraFar));
+                    ExrWriter.writeRgbHalfZ(file, cachedDofBuf, cachedLinearDepth, FULL_W, FULL_H,
+                            cameraNear, cameraFar, meta);
+                }
+                case "DNG" -> DngWriter.writeLinearRawDng(file, cachedDofBuf, cachedLinearDepth, FULL_W, FULL_H,
+                        cameraNear, cameraFar, true,
+                        snapshotIso, snapshotShutter, snapshotAperture, snapshotFocalLength, snapshotExposureEV,
+                        snapshotMeteringMode, snapshotExposureProgram, snapshotExposureMode,
+                        snapshotWbAuto, snapshotLensName, snapshotCamName, snapshotDateStr);
+                default -> {
+                    tonemapToDisplay(cachedDofBuf, cachedPixelBuffer, linear);
+                    cachedPixelBuffer.position(0);
+                    TiffWriter.writeRgb32fBuffer(file, cachedPixelBuffer, FULL_W, FULL_H,
+                            snapshotIso, snapshotShutter, snapshotAperture, snapshotFocalLength, snapshotExposureEV,
+                            snapshotWb, snapshotMeteringMode, snapshotExposureProgram, snapshotExposureMode,
+                            snapshotWbAuto, snapshotLensName, snapshotCamName, snapshotDateStr);
+                }
+            }
 
             CameraMod.LOGGER.info("[CameraMod] 已保存: {}", file.getAbsolutePath());
             client.execute(() -> {
@@ -399,6 +434,7 @@ public class HighResCapture {
         cachedDofBuf = null;
         cachedPixelBuffer = null;
         cachedLdrBuffer = null;
+        cachedLinearDepth = null;
     }
 
     /**
@@ -459,7 +495,11 @@ public class HighResCapture {
      * ISO/shutter/aperture offset is measured against the metered scene. LDR
      * input is already tonemapped, so it only gets the exposure offset.
      */
-    private static void processToDisplay(FloatBuffer src, ByteBuffer dst, boolean linear) {
+    /**
+     * 线性域管线（原地）：曝光（HDR 用场景 key，LDR 用 ±5 档）+ 白平衡 + 色调 +
+     * 噪点。三种导出格式共用；之后按格式分流（TIFF tonemap / EXR-DNG 直写线性）。
+     */
+    private static void applyLinearPipeline(FloatBuffer src, boolean linear) {
         float totalStops = clamp(-snapshotMeterEV + snapshotExposureEV, -16f, 8f);
         float exposure = (float) Math.pow(2, totalStops);
         if (linear) {
@@ -499,9 +539,7 @@ public class HighResCapture {
         final float noiseFloor = 0.15f * ns;
 
         parallelFor(0, FULL_H, y -> {
-            int srcY = FULL_H - 1 - y;
-            int srcRow = srcY * FULL_W * 4;
-            int dstRow = y * FULL_W * 12;
+            int srcRow = y * FULL_W * 4;   // 原地线性处理：行序无关，翻转交给各 writer
             for (int x = 0; x < FULL_W; x++) {
                 int s = srcRow + x * 4;
                 float r = src.get(s) * exp * rg;
@@ -533,6 +571,24 @@ public class HighResCapture {
                     }
                 }
 
+                src.put(s, r);
+                src.put(s + 1, g);
+                src.put(s + 2, b);
+            }
+        });
+    }
+
+    /** TIFF 显示域路径：线性数据 -> ACES（HDR）/直通（LDR）-> sRGB 编码 -> 32-bit float（行翻转）。 */
+    private static void tonemapToDisplay(FloatBuffer src, ByteBuffer dst, boolean linear) {
+        parallelFor(0, FULL_H, y -> {
+            int srcY = FULL_H - 1 - y;
+            int srcRow = srcY * FULL_W * 4;
+            int dstRow = y * FULL_W * 12;
+            for (int x = 0; x < FULL_W; x++) {
+                int s = srcRow + x * 4;
+                float r = src.get(s);
+                float g = src.get(s + 1);
+                float b = src.get(s + 2);
                 if (linear) {
                     r = aces(r);
                     g = aces(g);
@@ -620,6 +676,7 @@ public class HighResCapture {
             cachedDofBuf = BufferUtils.createFloatBuffer(FULL_W * FULL_H * 4);
             cachedPixelBuffer = BufferUtils.createByteBuffer(FULL_W * FULL_H * 3 * 4).order(ByteOrder.LITTLE_ENDIAN);
             cachedLdrBuffer = BufferUtils.createByteBuffer(FULL_W * FULL_H * 4);
+            cachedLinearDepth = BufferUtils.createFloatBuffer(FULL_W * FULL_H);
         }
     }
 
@@ -643,7 +700,8 @@ public class HighResCapture {
         }
     }
 
-    private static void applyDepthOfField(FloatBuffer src, FloatBuffer depth, FloatBuffer dst, int w, int h, float focusDist, float focalMm, float aperture, float near, float far) {
+    private static void applyDepthOfField(FloatBuffer src, FloatBuffer depth, FloatBuffer dst, FloatBuffer linDepth,
+                                          int w, int h, float focusDist, float focalMm, float aperture, float near, float far) {
         int n = w * h;
         float[] coc = new float[n];
         float[] cocTemp = new float[n];
@@ -652,6 +710,7 @@ public class HighResCapture {
             float z = depth.get(i);
             float zNdc = z * 2f - 1f;
             float linear = (z < 1.0f) ? 2f * near * far / (far + near - zNdc * (far - near)) : far;
+            linDepth.put(i, linear);   // EXR Z / DNG DepthMap 用：真实视线距离（方块）
             float c = DepthOfField.computeCocPixels(linear, focusDist, focalMm, aperture, h, snapshotSensorHeight);
             coc[i] = DepthOfField.softKnee(DepthOfField.clampCoc(c, h));
         });
