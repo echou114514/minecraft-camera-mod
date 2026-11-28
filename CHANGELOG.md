@@ -41,14 +41,15 @@ All notable changes to this project are documented in this file.
 - Config file `config/camera-mod.json` (`hideVanillaHud`, `meteringIntervalTicks`, `settleFrames`, `mmPerBlock`, `irisHdrTarget`, `filenamePrefix`) plus a Mod Menu settings screen; JVM system properties still override when explicitly set.
 - `InGameHudMixin` honours `hideVanillaHud`; crosshair injection is soft (`require = 0`).
 - TIFF gains a `Software` tag.
-- Build defaults to official Maven/Gradle sources; CN mirrors moved to an opt-in script (`scripts/enable-cn-mirrors.sh`); loom pinned to 1.17.21 (was a floating SNAPSHOT); `fabric-api` dependency given a version floor.
+- Build defaults to official Maven/Gradle sources; CN mirrors are a project-level opt-in (`scripts/enable-cn-mirrors.sh` / `scripts/disable-cn-mirrors.sh`, covering loom and the Gradle wrapper) guarded by a pre-commit/CI lint; loom pinned to 1.17.21 (was a floating SNAPSHOT); `fabric-api` dependency given a version floor.
 
 ### Developer
 - **Automatic versioning**: `gradle.properties` pins only `mod_version_base`; the real version is derived from git — tag `v1.2.0` builds as `1.2.0`, ordinary commits as `<base>-dev.<commitCount>+<shortHash>`.
 - **DH+Iris combo matrix verified in dev**: Iris 1.8.8 / Sodium 0.6.9 / DH 3.3.3 / Complementary Reimagined — all four iris×dh on/off combos pass (HDR from colortex0, exports + screenshots per combo). Iris toggled via the official IrisApi.v0, DH via `quickEnableRendering`; dev-only JiJ library jars (jcpp/glsl-transformer/antlr4) are shipped to the dev classpath since Loom does not expand nested jars of `files()` deps. Auto-test now saves & quits on completion (with force-exit fallback for DH's slow database shutdown); `-PwithIrisDev` accepts a bare flag.
 - **Unattended auto-test harness** (`-Dcameramod.autoTest=<outDir|true>` or `-PautoTest`): creates/reuses a UUID-named test world, waits for fps/tps/mspt stability, screenshots hand-held style + Neon/Classic HUDs, exports parameter-preset TIFFs across Iris/DH on-off combos (DH detected from mixin/log lines with parse-progress extraction), writes `run/auto-test/{shots,exports,metrics.csv,report.json}` and wipes them on next startup.
 - **Commit-to-release pipeline**: push to `main`/`master` builds and refreshes the rolling *Dev Snapshot* prerelease; tag `vX.Y.Z` publishes a stable release (jar named by the tag). CI checkouts use full history for real dev versions.
-- CI: Java 21 (matches the mod), Gradle caching, concurrency cancellation.
+- CI: Java 21 (matches the mod), Gradle caching, concurrency cancellation, and a `commit-lint.sh --all` step that rejects committed CN mirror config.
+- **CN mirror toggle**: `enable-cn-mirrors.sh` now edits only this checkout (loom properties plus the wrapper distribution URL, with a gitignored `*.cn-backup`); `disable-cn-mirrors.sh` restores official sources. `scripts/commit-lint.sh` runs from `.githooks/pre-commit` (install with `scripts/install-git-hooks.sh`) and blocks mirror config so GitHub Actions keeps using official sources.
 - README gained a CN local-build guide (opt-in BMCLAPI mirrors for loom, Gradle distribution download workarounds) and a mechanics overview; `CHANGELOG.md` added; TODO/PROGRESS rewritten to match actual behaviour.
 
 ## [1.1.0-beta]

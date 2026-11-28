@@ -27,6 +27,8 @@ jobs:
         with:
           # Full history so `git rev-list --count` produces real dev versions.
           fetch-depth: 0
+      - name: lint build config (no CN mirrors)
+        run: ./scripts/commit-lint.sh --all
       - name: setup jdk
         uses: actions/setup-java@v5
         with:

@@ -128,28 +128,36 @@ JVM 属性 `-Dcameramod.mmPerBlock / -Dcameramod.irisHdrTarget / -Dcameramod.set
 
 ## 本地构建（中国大陆网络指南）
 
-前置：JDK 21。仓库默认**官方源**，海外用户与 CI 零配置可直接构建；国内网络按需做以下两步：
+前置：JDK 21。仓库默认**官方源**，海外用户与 CI 零配置可直接构建；国内网络可按需启用项目级镜像：
 
-**1. loom 依赖镜像（Minecraft 库 / 资源 / 版本清单走 BMCLAPI）**
+**一键启用项目级镜像（loom 依赖 + Gradle 发行包）**
 
 ```bash
-./scripts/enable-cn-mirrors.sh   # 写入 ~/.gradle/gradle.properties，对本机所有 Gradle 项目生效
+./scripts/enable-cn-mirrors.sh    # 只改本仓库，不影响 ~/.gradle 或其他项目
+./scripts/disable-cn-mirrors.sh   # 恢复官方源
 ```
 
-恢复官方源：删除 `~/.gradle/gradle.properties` 中的 `loom_*` 三行。仓库文件始终保持官方源，**不要**把镜像提交进来。
+启用后会临时修改仓库内两个文件：
 
-**2. Gradle 发行包下载**
+- `gradle.properties`：追加 BMCLAPI 的 `loom_*` 三行（Minecraft 库 / 资源 / 版本清单）；
+- `gradle/wrapper/gradle-wrapper.properties`：Gradle 发行包改走腾讯云镜像，原文件备份为 `*.cn-backup`（已 gitignore）。
 
-官方 `services.gradle.org` 会 307 到 GitHub Releases，部分网络环境（含部分代理）返回 504 无法下载。两种办法任选：
+切换 wrapper 下载源会改变 Gradle 的缓存目录，首次启用/关闭时可能重新下载一次发行包。
+
+**不要提交这些镜像配置**：GitHub Actions 在海外，走镜像反而更慢。`scripts/commit-lint.sh` 会检查暂存区，CI 也会跑 `--all`；`enable-cn-mirrors.sh` 会自动安装 hook，也可以手动执行：
 
 ```bash
-# 方式 A（推荐，不改仓库）：手动下载解压，直接用完整 Gradle
+./scripts/install-git-hooks.sh   # git config core.hooksPath .githooks
+```
+
+如果之前用过旧版脚本，`~/.gradle/gradle.properties` 里可能还有 `loom_*` 行；项目级配置会覆盖它们，建议手动删除，避免影响其他项目。
+
+**Gradle 发行包下载失败时**（官方 `services.gradle.org` 会 307 到 GitHub Releases，部分网络返回 504）：推荐直接用上面的 `enable-cn-mirrors.sh`，它会把 wrapper 切到腾讯云镜像。也可以手动下载解压后绕过 wrapper：
+
+```bash
 curl -sL https://mirrors.cloud.tencent.com/gradle/gradle-9.5.1-bin.zip -o /tmp/gradle.zip
 unzip /tmp/gradle.zip -d ~/tools/
 ~/tools/gradle-9.5.1/bin/gradle build    # 用它替代 ./gradlew
-
-# 方式 B（临时）：把 gradle/wrapper/gradle-wrapper.properties 的 distributionUrl
-# 改为 https://mirrors.cloud.tencent.com/gradle/gradle-9.5.1-bin.zip（勿提交）
 ```
 
 **常用命令**
@@ -202,6 +210,6 @@ Iris 1.8.8 / Sodium 0.6.9 / DH 3.3.3（满足 DH 2.3.0-b+）/ Complementary Reim
 - 网络慢时把 jar / 光影 zip 预先放进项目根目录的 `dev-mods/`（已 gitignore），`prepareDevRun` 会优先使用本地缓存。
 - `run/` 与 `dev-mods/` 都不进版本库；删除 `run/config/iris.properties` 可重新选择光影包。
 
-**中国镜像**：仓库默认官方源。需要镜像加速时运行 `scripts/enable-cn-mirrors.sh`（写入 `~/.gradle/gradle.properties`，对本机所有 Gradle 构建生效，仓库文件保持不变）。
+**中国镜像**：仓库默认官方源。需要镜像加速时运行 `scripts/enable-cn-mirrors.sh`（项目级：loom + Gradle wrapper），恢复用 `scripts/disable-cn-mirrors.sh`；commit lint 会阻止镜像配置进入 CI。
 
 !!!!!最重要的一点!!!!!：玩得开心！

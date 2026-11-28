@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# 安装：scripts/install-git-hooks.sh（设置 core.hooksPath=.githooks）
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+exec "$repo_root/scripts/commit-lint.sh" --staged
