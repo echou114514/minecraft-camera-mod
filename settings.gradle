@@ -1,7 +1,7 @@
 pluginManagement {
     repositories {
-        // Official sources first; CN mirrors (if any) live in the user's
-        // ~/.gradle/gradle.properties via scripts/enable-cn-mirrors.sh.
+        // Official sources first. For a local CN mirror, run
+        // scripts/enable-cn-mirrors.sh (project-level gradle.properties).
         maven {
             name = 'Fabric'
             url = 'https://maven.fabricmc.net/'

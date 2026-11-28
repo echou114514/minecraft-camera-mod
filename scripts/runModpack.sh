@@ -30,9 +30,22 @@ if [[ "${MP_RUNNER##*.}" != "sh" ]]; then
 fi
 
 mapfile -t jars < <(find "$project_dir/build/libs" -maxdepth 1 -type f -name 'camera-mod-*.jar' ! -name '*-sources.jar' -print | sort)
-if (( ${#jars[@]} != 1 )); then
-    echo "Error: expected exactly one built camera-mod jar in $project_dir/build/libs; found ${#jars[@]}. Run ./gradlew build first." >&2
+if (( ${#jars[@]} == 0 )); then
+    echo "Error: no built camera-mod jar in $project_dir/build/libs. Run ./gradlew build first." >&2
     exit 1
+fi
+
+# Versions are derived from git (commit count + short hash), so `build/libs` keeps
+# jars from earlier commits. Pick the newest one instead of requiring a single jar.
+latest="${jars[0]}"
+for jar in "${jars[@]}"; do
+    if [[ "$jar" -nt "$latest" ]]; then
+        latest="$jar"
+    fi
+done
+
+if (( ${#jars[@]} > 1 )); then
+    echo "提示：build/libs 有 ${#jars[@]} 个 camera-mod jar，使用最新的 $(basename -- "$latest")。"
 fi
 
 mods_dir="$MP_PATH/mods"
@@ -41,8 +54,8 @@ mkdir -p -- "$mods_dir"
 # Remove every other camera-mod jar first: version bumps would otherwise leave
 # two copies of the mod in the pack.
 find "$mods_dir" -maxdepth 1 -type f -name 'camera-mod-*.jar' ! -name '*-sources.jar' -delete
-install -m 0644 -- "${jars[0]}" "$mods_dir/$(basename -- "${jars[0]}")"
+install -m 0644 -- "$latest" "$mods_dir/$(basename -- "$latest")"
 
-echo "Installed $(basename -- "${jars[0]}") into $mods_dir"
+echo "Installed $(basename -- "$latest") into $mods_dir"
 echo "Launching modpack (output is also written to /tmp/latest.log)..."
 exec bash "$MP_RUNNER" "$@" 2>&1 | tee /tmp/latest.log

@@ -18,6 +18,8 @@ jobs:
         with:
           # Full history so the derived dev version (commit count + hash) is real.
           fetch-depth: 0
+      - name: lint build config (no CN mirrors)
+        run: ./scripts/commit-lint.sh --all
       - name: validate gradle wrapper
         uses: gradle/actions/wrapper-validation@v6
       - name: setup jdk
