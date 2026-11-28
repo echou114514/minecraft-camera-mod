@@ -125,6 +125,11 @@ public final class AutoTest {
     }
 
     public static void start(MinecraftClient client) {
+        // 测试默认 1/4 分辨率导出（1920×1080）：单张秒级完成，不拖垮机器。
+        // 想全分辨率测试：-Dcameramod.exportScale=1.0 显式覆盖。
+        if (System.getProperty("cameramod.exportScale") == null) {
+            System.setProperty("cameramod.exportScale", "0.25");
+        }
         ClientTickEvents.END_CLIENT_TICK.register(AutoTest::tick);
         CameraMod.LOGGER.info("[AutoTest] enabled (-Dcameramod.autoTest), out={}", System.getProperty("cameramod.autoTest"));
     }

@@ -24,8 +24,21 @@ import java.util.concurrent.Executors;
 import java.util.stream.IntStream;
 
 public class HighResCapture {
-    public static final int FULL_W = 7680;
-    public static final int FULL_H = 4320;
+    /**
+     * 导出分辨率（由 -Dcameramod.exportScale 缩放，默认 1.0 = 8K）。
+     * autoTest 默认 0.25（1920×1080），让测试秒级完成且不拖垮机器。
+     */
+    private static float exportScale() {
+        try {
+            float v = Float.parseFloat(System.getProperty("cameramod.exportScale", "1.0"));
+            if (v >= 0.05f && v <= 1.0f) return v;
+        } catch (NumberFormatException ignored) {
+        }
+        return 1.0f;
+    }
+
+    public static final int FULL_W = (int) Math.round(7680 * exportScale() / 2) * 2;
+    public static final int FULL_H = (int) Math.round(4320 * exportScale() / 2) * 2;
 
     private static final float MIDDLE_GRAY = 0.15f;
     private static final int SRGB_LUT_SIZE = 4096;
@@ -94,6 +107,25 @@ public class HighResCapture {
         t.setDaemon(true);
         return t;
     });
+
+    /**
+     * 后处理专用有界线程池：DoF/tonemap 的并行流在这里跑，只占约一半核心，
+     * 不会把整台机器拖到「未响应」（默认 4 线程，cameramod.captureThreads 可覆盖）。
+     */
+    private static final ForkJoinPool CPU_POOL = new ForkJoinPool(
+            captureThreads(),
+            ForkJoinPool.defaultForkJoinWorkerThreadFactory, null, true);
+
+    private static int captureThreads() {
+        int n = Integer.getInteger("cameramod.captureThreads", 0);
+        if (n <= 0) n = Math.max(2, Math.min(4, Runtime.getRuntime().availableProcessors() / 2));
+        return Math.min(n, Runtime.getRuntime().availableProcessors());
+    }
+
+    /** 在有界池内执行并行 for（parallel stream 会复用所在池，而非 commonPool）。 */
+    private static void parallelFor(int start, int end, java.util.function.IntConsumer body) {
+        CPU_POOL.submit(() -> java.util.stream.IntStream.range(start, end).parallel().forEach(body)).join();
+    }
 
     /**
      * Number of frames to let the world render at full resolution before the
@@ -395,7 +427,7 @@ public class HighResCapture {
             throw new IOException("主目标像素读取失败");
         }
 
-        IntStream.range(0, FULL_H).parallel().forEach(y -> {
+        parallelFor(0, FULL_H, y -> {
             for (int x = 0; x < FULL_W; x++) {
                 int i = (y * FULL_W + x) * 4;
                 float r = SRGB_BYTE_LUT[cachedLdrBuffer.get(i) & 0xFF];
@@ -411,7 +443,7 @@ public class HighResCapture {
 
     private static void copyColor(FloatBuffer src, FloatBuffer dst) {
         int n = FULL_W * FULL_H * 4;
-        IntStream.range(0, FULL_H).parallel().forEach(y -> {
+        parallelFor(0, FULL_H, y -> {
             int start = y * FULL_W * 4;
             int end = start + FULL_W * 4;
             for (int i = start; i < end; i++) {
@@ -465,7 +497,7 @@ public class HighResCapture {
         // grain at high ISO instead of going perfectly clean.
         final float noiseFloor = 0.15f * ns;
 
-        IntStream.range(0, FULL_H).parallel().forEach(y -> {
+        parallelFor(0, FULL_H, y -> {
             int srcY = FULL_H - 1 - y;
             int srcRow = srcY * FULL_W * 4;
             int dstRow = y * FULL_W * 12;
@@ -615,7 +647,7 @@ public class HighResCapture {
         float[] coc = new float[n];
         float[] cocTemp = new float[n];
 
-        IntStream.range(0, n).parallel().forEach(i -> {
+        parallelFor(0, n, i -> {
             float z = depth.get(i);
             float zNdc = z * 2f - 1f;
             float linear = (z < 1.0f) ? 2f * near * far / (far + near - zNdc * (far - near)) : far;
@@ -624,7 +656,7 @@ public class HighResCapture {
         });
 
         // 7x7 羽化窗口，抹平硬边
-        IntStream.range(0, h).parallel().forEach(y -> {
+        parallelFor(0, h, y -> {
             for (int x = 0; x < w; x++) {
                 float sum = 0; int count = 0;
                 for (int dx = -3; dx <= 3; dx++) {
@@ -634,7 +666,7 @@ public class HighResCapture {
                 cocTemp[y * w + x] = sum / count;
             }
         });
-        IntStream.range(0, h).parallel().forEach(y -> {
+        parallelFor(0, h, y -> {
             for (int x = 0; x < w; x++) {
                 float sum = 0; int count = 0;
                 for (int dy = -3; dy <= 3; dy++) {
@@ -647,7 +679,7 @@ public class HighResCapture {
 
         float GOLDEN = 2.399963f;
 
-        IntStream.range(0, h).parallel().forEach(y -> {
+        parallelFor(0, h, y -> {
             for (int x = 0; x < w; x++) {
                 int i = y * w + x;
                 int i4 = i * 4;
