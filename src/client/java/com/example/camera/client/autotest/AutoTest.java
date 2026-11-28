@@ -105,6 +105,9 @@ public final class AutoTest {
     private static int stepIndex;
     private static int stepWait;
     private static int quitTicks;
+    private static final java.util.List<String> EXPORT_FORMATS =
+            java.util.List.of("TIFF", "EXR", "DNG");
+    private static String exportPrevFormat;
     private static String exportPresetName;
     private static List<File> exportBefore;
     private static int exportTicksLeft;
@@ -125,6 +128,11 @@ public final class AutoTest {
     }
 
     public static void start(MinecraftClient client) {
+        // 测试默认 1/4 分辨率导出（1920×1080）：单张秒级完成，不拖垮机器。
+        // 想全分辨率测试：-Dcameramod.exportScale=1.0 显式覆盖。
+        if (System.getProperty("cameramod.exportScale") == null) {
+            System.setProperty("cameramod.exportScale", "0.25");
+        }
         ClientTickEvents.END_CLIENT_TICK.register(AutoTest::tick);
         CameraMod.LOGGER.info("[AutoTest] enabled (-Dcameramod.autoTest), out={}", System.getProperty("cameramod.autoTest"));
     }
@@ -586,7 +594,7 @@ public final class AutoTest {
             if (exportPresetName == null) {
                 applyPresetToCamera(client, preset);
                 exportPresetName = preset[0];
-                exportBefore = listTiffs(client.runDirectory.toPath().resolve("screenshots").toFile());
+                exportBefore = listExports(client.runDirectory.toPath().resolve("screenshots").toFile());
                 exportTicksLeft = 20 * 180;   // 3 分钟上限
                 exportTriggerPending = true;
                 stepWait = 5;   // 让 tickMetering 用新档位刷新 cached*，否则快门慢一档
@@ -598,18 +606,20 @@ public final class AutoTest {
                 return;
             }
             if (!HighResCapture.isBusy()) {
-                List<File> after = listTiffs(client.runDirectory.toPath().resolve("screenshots").toFile());
+                List<File> after = listExports(client.runDirectory.toPath().resolve("screenshots").toFile());
                 after.removeAll(exportBefore);
                 if (!after.isEmpty()) {
-                    File dst = new File(exportsDir, "export_" + comboTag + "_" + exportPresetName + ".tiff");
+                    File src = after.get(0);
+                    File dst = new File(exportsDir, "export_" + comboTag + "_" + exportPresetName
+                            + src.getName().substring(src.getName().lastIndexOf('.')));
                     try {
-                        Files.copy(after.get(0).toPath(), dst.toPath());
-                        reportExport(comboTag, exportPresetName, dst.getName());
+                        Files.copy(src.toPath(), dst.toPath());
+                        reportExport(comboTag, exportPresetName, dst.getName() + " [" + validateMagic(dst) + "]");
                     } catch (IOException e) {
                         CameraMod.LOGGER.warn("[AutoTest] copy export failed: {}", e.toString());
                     }
                 } else {
-                    CameraMod.LOGGER.warn("[AutoTest] export finished but no new TIFF for preset {}", exportPresetName);
+                    CameraMod.LOGGER.warn("[AutoTest] export finished but no new file for preset {}", exportPresetName);
                 }
                 exportPresetName = null;
                 exportBefore = null;
@@ -625,7 +635,63 @@ public final class AutoTest {
             }
             return;
         }
-        if (exportStep > EXPORT_PRESETS.length || exportStep > EXPORTS) {
+        int presetCount = Math.min(EXPORTS, EXPORT_PRESETS.length);
+        int fmtStep = exportStep - presetCount - 1;
+        if (exportStep > presetCount && fmtStep < EXPORT_FORMATS.size()) {
+            String fmt = EXPORT_FORMATS.get(fmtStep);
+            String[] preset = {"fmt_" + fmt.toLowerCase(java.util.Locale.ROOT), "P", "0", "0", "1"};
+            if (exportPresetName == null) {
+                // 覆盖本次导出格式（AutoTest 专属；结束后恢复原值）
+                String prev = CameraModConfig.get().exportFormat;
+                applyPresetToCamera(client, preset);
+                CameraModConfig.get().exportFormat = fmt;
+                exportPrevFormat = prev;
+                exportPresetName = preset[0];
+                exportBefore = listExports(client.runDirectory.toPath().resolve("screenshots").toFile());
+                exportTicksLeft = 20 * 120;
+                exportTriggerPending = true;
+                stepWait = 5;
+                return;
+            }
+            if (exportTriggerPending) {
+                exportTriggerPending = false;
+                CameraModConfig.get().exportFormat = fmt;   // applyPresetToCamera 后可能被读回
+                CameraModClient.executeCapture(client);
+                return;
+            }
+            if (!HighResCapture.isBusy()) {
+                List<File> after = listExports(client.runDirectory.toPath().resolve("screenshots").toFile());
+                after.removeAll(exportBefore);
+                if (!after.isEmpty()) {
+                    File src = after.get(0);
+                    File dst = new File(exportsDir, "export_" + comboTag + "_" + exportPresetName
+                            + src.getName().substring(src.getName().lastIndexOf('.')));
+                    try {
+                        Files.copy(src.toPath(), dst.toPath());
+                        reportExport(comboTag, exportPresetName, dst.getName() + " [" + validateMagic(dst) + "]");
+                    } catch (IOException e) {
+                        CameraMod.LOGGER.warn("[AutoTest] copy export failed: {}", e.toString());
+                    }
+                } else {
+                    CameraMod.LOGGER.warn("[AutoTest] format export finished but no new file ({})", fmt);
+                }
+                CameraModConfig.get().exportFormat = exportPrevFormat;
+                exportPresetName = null;
+                exportBefore = null;
+                stepIndex++;
+                stepWait = 10;
+            } else if (--exportTicksLeft <= 0) {
+                CameraMod.LOGGER.warn("[AutoTest] format export timed out ({})", fmt);
+                reportTimedOutExport(comboTag, exportPresetName);
+                CameraModConfig.get().exportFormat = exportPrevFormat;
+                exportPresetName = null;
+                exportBefore = null;
+                stepIndex++;
+                stepWait = 10;
+            }
+            return;
+        }
+        if (fmtStep >= EXPORT_FORMATS.size()) {
             comboIndex++;
             stepIndex = 0;
             stepWait = 10;
@@ -668,9 +734,24 @@ public final class AutoTest {
         CameraMod.LOGGER.info("[AutoTest] exported {} ({})", file, tag);
     }
 
-    private static List<File> listTiffs(File dir) {
-        File[] files = dir.listFiles((d, n) -> n.endsWith(".tiff"));
+    private static List<File> listExports(File dir) {
+        File[] files = dir.listFiles((d, n) -> n.endsWith(".tiff") || n.endsWith(".exr") || n.endsWith(".dng"));
         return files == null ? new ArrayList<>() : new ArrayList<>(Arrays.asList(files));
+    }
+
+    /** 魔数校验：TIFF/DNG = II*\0，EXR = 0x762f3101；结果进 report。 */
+    private static String validateMagic(File f) throws IOException {
+        byte[] m = new byte[4];
+        try (var in = java.nio.file.Files.newInputStream(f.toPath())) {
+            int rd = in.read(m);
+            if (rd < 4) return "too-short";
+        }
+        String hex = String.format("%02x%02x%02x%02x", m[0], m[1], m[2], m[3]);
+        return switch (hex) {
+            case "49492a00" -> "TIFF/DNG-ok";
+            case "762f3101" -> "EXR-ok";
+            default -> "unknown:" + hex;
+        };
     }
 
     private static void prepareCamera(MinecraftClient client) {
@@ -705,6 +786,7 @@ public final class AutoTest {
         exportPresetName = null;
         exportBefore = null;
         exportTriggerPending = false;
+        if (exportPrevFormat != null) CameraModConfig.get().exportFormat = exportPrevFormat;
         client.options.setPerspective(Perspective.FIRST_PERSON);
         CameraModConfig.get().uiStyle = "Neon";
         CameraModConfig.get().save();
