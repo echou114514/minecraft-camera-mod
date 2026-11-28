@@ -118,8 +118,11 @@
 | `mmPerBlock` | `375` | 薄透镜模型的世界比例（mm/方块） |
 | `irisHdrTarget` | `AUTO` | Iris HDR 缓冲：`AUTO` 解析当前光影包 final 程序的 `texture(colortexN)` 采样自动选定（Eclipse→colortex5，Complementary→colortex3 实测通过）；`0-15` 手动指定；`-1` 禁用 HDR 读取 |
 | `filenamePrefix` | `camera_` | 保存文件名前缀 |
+| `exportFormat` | `TIFF` | 导出格式：`TIFF`（32-bit 浮点、显示域）/ `EXR`（**场景线性 HDR** + Z 深度通道，供 Blender/Nuke 合成，darktable 里显灰需调色）/ `DNG`（DNG 1.5 LinearRaw 16-bit 线性 raw + DepthMap，直接当 raw 调色） |
+| `exportScale` | `1.0` | 导出分辨率缩放（`0.25` = 1920×1080）；autoTest 默认 0.25 |
+| `captureThreads` | 自动 | 后处理并行线程数（默认约半核），防止导出时占满全部核心拖垮系统 |
 
-JVM 属性 `-Dcameramod.mmPerBlock / -Dcameramod.irisHdrTarget / -Dcameramod.settleFrames` 显式设置时仍可覆盖配置文件。
+JVM 属性 `-Dcameramod.mmPerBlock / -Dcameramod.irisHdrTarget / -Dcameramod.settleFrames / -Dcameramod.exportScale / -Dcameramod.captureThreads` 显式设置时仍可覆盖配置文件。
 
 ## 安装与运行说明
 1. 下载 Release 中的 `.jar` 文件。
